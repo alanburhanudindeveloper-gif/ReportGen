@@ -1,0 +1,1625 @@
+FINAL MASTER PROMPT
+
+AI-Assisted Proposal Report Adaptation Engine
+
+Goal: Fast, Accurate, Token-Efficient, Deterministic + AI
+
+You are implementing an AI-assisted automation system for an EXISTING production Proposal/Report development workflow.
+
+This system is NOT a generic PDF-to-RDLC converter.
+
+The real objective is to automate and improve the existing manual workflow:
+
+Existing Proposal Product
+→ discover similar benchmark product
+→ inspect existing ProposalBuilder / ProposalElement / RDLC
+→ understand differences
+→ copy proven implementation
+→ rename ProductCode / PlanCode / related identifiers
+→ minimally modify only required logic/layout
+→ provide controlled sample data
+→ build
+→ execute actual VB.NET report logic
+→ render actual RDLC 2008 to PDF
+→ validate
+→ visually compare with target PDF
+→ user approval
+→ CLI dry-run
+→ CLI insert into real project
+
+The system must optimize for:
+
+1. Accuracy
+2. Deterministic behavior
+3. Low token consumption
+4. Fast execution
+5. Minimal AI calls
+6. Reuse of proven existing implementation
+7. Full traceability
+8. Safe modification
+9. Real compilation
+10. Real RDLC rendering
+11. Human approval before production insertion
+
+---
+
+1. ABSOLUTE TECHNOLOGY CONSTRAINT
+
+The EXISTING TARGET PROJECT is VB.NET.
+
+It contains:
+
+- ".vb" source files
+- "ProposalBuilder.vb"
+- "ProposalElement.vb"
+- ProductEngine dependencies
+- existing report execution logic
+- RDLC 2008 report files
+
+DO NOT assume C#.
+
+DO NOT convert VB.NET to C#.
+
+DO NOT redesign the existing target project into a modern architecture.
+
+DO NOT migrate the target project to another .NET version unless the actual project explicitly requires it.
+
+DO NOT upgrade RDLC 2008 unless the actual production project already uses another version.
+
+The automation application itself may use Python, TypeScript, C#, or another suitable technology.
+
+That technology is separate from the EXISTING TARGET PROJECT.
+
+The automation system must first inspect and detect the actual target technology.
+
+Create a deterministic TechnologyProfile:
+
+{
+  "language": "VB.NET",
+  "languageVersion": "...",
+  "projectType": "...",
+  "targetFramework": "...",
+  "projectFormat": "...",
+  "buildTool": "...",
+  "compiler": "...",
+  "rdlcVersion": "2008",
+  "reportRuntime": "...",
+  "references": [],
+  "packages": []
+}
+
+Do not invent values.
+
+Every value must come from actual project inspection.
+
+TechnologyProfile is a HARD CONSTRAINT for:
+
+- parsing
+- analysis
+- transformation
+- generation
+- compilation
+- report execution
+- RDLC rendering
+- validation
+- insertion
+
+---
+
+2. DO NOT START BY WRITING IMPLEMENTATION
+
+The FIRST execution must be INSPECTION ONLY.
+
+Do not:
+
+- modify the target repository
+- create generated production artifacts
+- rewrite VB.NET
+- rewrite RDLC
+- install unnecessary dependencies
+- overwrite files
+- generate fake implementation
+
+First inspect the actual project.
+
+Produce an inspection report containing:
+
+1. Current architecture
+2. TechnologyProfile
+3. Project structure
+4. Proposal structure
+5. ProposalBuilder patterns
+6. ProposalElement patterns
+7. ProductCode / PlanCode conventions
+8. Naming conventions
+9. RDLC conventions
+10. RDLC version
+11. Report runtime
+12. Report execution mechanism
+13. DataSet/DataTable/DataSource mechanism
+14. Parameters
+15. ProductEngine dependencies
+16. Existing mock/test mechanisms
+17. Existing test infrastructure
+18. Existing PDF/report libraries
+19. Existing compiler/build mechanism
+20. Number of RDLCs used by each Proposal
+21. Builder → Element → RDLC dependency graph
+22. Shared RDLCs
+23. Unused RDLC candidates
+24. Unresolved references
+25. PDF A analysis capability
+26. PDF B analysis capability
+27. Sample-data strategy
+28. Existing project boundaries
+29. Recommended automation architecture
+30. AI vs deterministic responsibilities
+31. RAG/vector strategy
+32. LangChain/agent strategy
+33. caching strategy
+34. token optimization strategy
+35. staging strategy
+36. CLI insertion strategy
+37. backup/rollback strategy
+38. collision handling
+39. approval flow
+40. risks
+41. implementation phases
+42. files that WOULD be created/modified
+
+Only after inspection is complete should implementation begin.
+
+---
+
+3. CORE ARCHITECTURE PRINCIPLE
+
+The system must use this principle:
+
+AI decides WHAT.
+Deterministic code decides HOW.
+Existing production code defines WHAT IS ALREADY PROVEN.
+
+AI must NOT directly freestyle-edit production source files.
+
+The preferred flow is:
+
+AI
+↓
+Structured Decision
+↓
+ProposalDefinition
+↓
+Deterministic Transformation
+↓
+Generated/Staged Files
+
+Never:
+
+AI
+↓
+rewrite entire VB.NET file
+↓
+hope it works
+
+---
+
+4. EXISTING PROJECT IS THE SOURCE OF IMPLEMENTATION TRUTH
+
+Treat existing production implementation as executable templates.
+
+Default strategy:
+
+COPY
+→ RENAME
+→ PATCH ONLY REQUIRED PARTS
+
+Never default to:
+
+READ
+→ AI REWRITE
+→ REGENERATE ENTIRE FILE
+
+If benchmark implementation is 95% reusable, approximately 95% must remain unchanged.
+
+Preserve:
+
+- existing methods
+- calculations
+- conditions
+- helper functions
+- ProductEngine integration
+- dependencies
+- formatting logic
+- report invocation
+- error handling
+- unrelated business logic
+
+Every transformation must produce a change classification:
+
+UNCHANGED
+RENAMED
+MODIFIED
+ADDED
+REMOVED
+REQUIRES_REVIEW
+
+Example:
+
+UNCHANGED: 92%
+RENAMED: 5%
+MODIFIED: 3%
+
+If deterministic transformation cannot safely perform a required modification:
+
+REQUIRES_REVIEW
+
+STOP.
+
+Do not invent VB.NET logic.
+
+---
+
+5. PROPOSALBUILDER IS THE PRIMARY DISCOVERY ENTRY POINT
+
+Do NOT discover Proposal structure merely from filenames or directory listing.
+
+"ProposalBuilder.vb" is the primary implementation entry point.
+
+Use VB.NET-aware parsing and semantic analysis to discover:
+
+- ProposalElement instances
+- Element creation
+- Element usage
+- section construction
+- report invocation
+- RDLC references
+- DataSets
+- DataSources
+- parameters
+- ProductEngine calls
+- helper dependencies
+- conditions
+- runtime flow
+
+The scanner must build a real dependency graph.
+
+Example:
+
+ProposalBuilder.vb
+│
+├── CustomerElement
+│      └── Customer.rdlc
+│
+├── BenefitElement
+│      ├── Benefit.rdlc
+│      └── BenefitDetail.rdlc
+│
+└── SignatureElement
+       └── Signature.rdlc
+
+A Proposal may use multiple RDLC files.
+
+NEVER assume:
+
+1 Proposal = 1 RDLC
+
+The system must distinguish:
+
+- directly referenced RDLC
+- indirectly referenced RDLC
+- shared RDLC
+- unused candidate RDLC
+- unresolved RDLC reference
+
+Reconcile:
+
+VB.NET references
++
+Project references
++
+File system candidates
++
+RDLC contents
++
+runtime relationships
+
+to create the actual Proposal dependency graph.
+
+---
+
+6. TWO PDF INPUTS
+
+The workflow has TWO distinct PDFs.
+
+PDF A — Target/New Product Template
+
+This defines the desired output.
+
+Analyze:
+
+- page count
+- page size
+- sections
+- tables
+- labels
+- dynamic fields
+- status
+- images
+- spacing
+- alignment
+- typography
+- borders
+- layout
+- pagination
+- section ordering
+
+PDF B — Existing System Generated PDF
+
+This is the Golden/Reference Output.
+
+Use it for:
+
+- realistic sample data
+- existing output reference
+- understanding existing visual patterns
+- candidate benchmark identification
+- field/value extraction
+
+PDF B data is NOT automatically backend truth.
+
+Every extracted value must contain provenance:
+
+{
+  "field": "Premium",
+  "value": 750000,
+  "sourcePdf": "reference.pdf",
+  "page": 3,
+  "region": "...",
+  "extractionMethod": "...",
+  "confidence": 0.96,
+  "classification": "EXTRACTED"
+}
+
+Possible classifications:
+
+EXTRACTED
+INFERRED
+UNAVAILABLE
+MANUAL
+
+Never silently convert inferred information into production binding.
+
+---
+
+7. BENCHMARK SELECTION
+
+Do not treat PDF A as a request to reconstruct an RDLC from scratch.
+
+Instead:
+
+Existing benchmark implementations
++
+Target PDF
+↓
+Semantic comparison
+↓
+Benchmark candidates
+↓
+Best proven implementation pattern
+
+The benchmark should be selected based on:
+
+- visual similarity
+- section similarity
+- Element similarity
+- field similarity
+- RDLC structure
+- Builder structure
+- business semantics
+- historical accepted decisions
+
+AI may recommend benchmark candidates.
+
+Deterministic analysis must verify the candidate actually exists and is structurally compatible.
+
+---
+
+8. HYBRID RETRIEVAL
+
+Use multiple retrieval mechanisms.
+
+Do NOT make Vector DB the source of truth.
+
+Use:
+
+Exact Search
++
+Structured Query
++
+Dependency Graph
++
+Vector Search
++
+Reranking
+
+Recommended priority:
+
+1. Exact retrieval
+2. Structured retrieval
+3. Dependency graph
+4. Vector retrieval
+5. Reranking
+6. LLM reasoning
+
+Cheap operations must happen before expensive operations.
+
+Example:
+
+Search "BenefitAmount"
+↓
+exact symbol search
+↓
+find related ProposalElements
+↓
+find related RDLC
+↓
+vector search for semantic alternatives
+↓
+rerank
+↓
+LLM only if ambiguity remains
+
+---
+
+9. VECTOR DB / RAG
+
+Use Vector DB where semantic retrieval provides real value.
+
+Do NOT embed every file blindly.
+
+Index semantic units such as:
+
+- Proposal
+- ProposalBuilder
+- ProposalElement
+- method
+- property
+- RDLC
+- DataSet
+- DataSource
+- Tablix
+- TextBox
+- expression
+- business rule
+- field mapping
+- historical decision
+
+Example vector metadata:
+
+{
+  "kind": "ProposalElement",
+  "product": "MFA",
+  "element": "Benefit",
+  "semantic": "Displays insurance benefit information",
+  "source": "MFAProposalElement.vb",
+  "symbols": [
+    "BuildBenefit",
+    "BenefitAmount"
+  ],
+  "rdlc": [
+    "MFABenefit.rdlc"
+  ]
+}
+
+Vector DB must be abstracted:
+
+ISemanticStore
+
+Possible implementations:
+
+LocalVectorStore
+Qdrant
+pgvector
+Chroma
+FAISS
+
+Do not hard-code the architecture to one vendor.
+
+Do not introduce PostgreSQL only because Vector DB exists.
+
+---
+
+10. KNOWLEDGE GRAPH
+
+Create a structured dependency/knowledge graph.
+
+Example:
+
+Proposal
+ ↓
+ProposalBuilder
+ ↓
+ProposalElement
+ ↓
+Method
+ ↓
+DataBinding
+ ↓
+RDLC
+ ↓
+DataSet
+ ↓
+Field
+
+Also represent:
+
+Product
+Plan
+Proposal
+Section
+Element
+RDLC
+Dataset
+Field
+ProductEngine source
+
+Vector DB answers:
+
+«What is semantically similar?»
+
+Knowledge graph answers:
+
+«What is actually connected?»
+
+The graph is authoritative for structural relationships.
+
+---
+
+11. LANGCHAIN / AGENT ORCHESTRATION
+
+Use LangChain or equivalent orchestration where it materially improves:
+
+- tool orchestration
+- retrieval
+- structured output
+- agent workflow
+- context management
+- model routing
+- retries
+- tracing
+
+Do NOT put core deterministic business logic inside an LLM agent.
+
+Agents should receive constrained tools such as:
+
+searchProject()
+findSymbol()
+getProposalGraph()
+getRdlcStructure()
+findSimilarElement()
+getSourceSlice()
+getFieldMapping()
+comparePdfSection()
+getHistoricalDecision()
+validateDecision()
+
+Agents must NOT receive an unrestricted:
+
+writeFile()
+
+for production source modification.
+
+---
+
+12. AI AGENTS
+
+Use specialized agents/tasks rather than one giant agent.
+
+Possible roles:
+
+Project Analysis Agent
+PDF Analysis Agent
+Benchmark Retrieval Agent
+Differential Analysis Agent
+Field Mapping Agent
+Proposal Definition Agent
+Validation Diagnosis Agent
+
+However, do not create agents merely for naming purposes.
+
+If deterministic logic can solve the task, no agent is needed.
+
+---
+
+13. AI ESCALATION STRATEGY
+
+Minimize expensive model calls.
+
+Use:
+
+LEVEL 0
+Deterministic
+↓
+Can solve?
+YES → DONE
+
+NO
+↓
+
+LEVEL 1
+Exact + Structured Retrieval
+↓
+Known pattern?
+YES → DONE
+
+NO
+↓
+
+LEVEL 2
+Vector/RAG
+↓
+Strong candidate?
+YES → structured AI decision
+
+NO
+↓
+
+LEVEL 3
+Small/cheap LLM
+↓
+Semantic reasoning
+
+LOW CONFIDENCE
+↓
+
+LEVEL 4
+Stronger LLM
+↓
+Human review
+
+Never use an expensive model when a cheaper deterministic solution is sufficient.
+
+---
+
+14. CONTEXT COMPILER
+
+Create a Context Compiler.
+
+The LLM must NEVER receive the entire repository by default.
+
+Flow:
+
+Repository
+↓
+Deterministic Analysis
+↓
+Knowledge Graph
+↓
+Retrieval
+↓
+Context Compiler
+↓
+Minimal Relevant Context
+↓
+LLM
+
+Example:
+
+For a target Benefit section, the AI may receive only:
+
+1. Target PDF section #3
+2. MFA.BenefitElement.vb
+3. MFA.Benefit.rdlc
+4. MFA ProposalBuilder BuildBenefit()
+5. ProductEngine Benefit contract
+6. Previous accepted mapping
+
+Not:
+
+entire repository
+
+This is a mandatory token optimization strategy.
+
+---
+
+15. SEMANTIC CHUNKING
+
+Do not chunk source code arbitrarily by line count.
+
+Bad:
+
+500 lines
+500 lines
+500 lines
+
+Prefer:
+
+Class
+Method
+Property
+Element
+DataBinding
+RDLC Dataset
+RDLC Tablix
+RDLC TextBox
+Expression
+Dependency
+Business Rule
+
+Each chunk must retain metadata and source location.
+
+---
+
+16. CACHING
+
+Cache deterministic and semantic analysis aggressively.
+
+Use content hashes.
+
+Example:
+
+MFAProposalBuilder.vb
+SHA256 = ABC123
+
+Then:
+
+AnalysisCache[ABC123]
+
+If unchanged:
+
+NO RE-PARSE
+NO RE-EMBED
+NO LLM
+
+Apply caching to:
+
+- project scan
+- VB.NET analysis
+- RDLC analysis
+- PDF extraction
+- PDF geometry
+- embeddings
+- retrieval
+- AI decisions where safe
+- visual comparison
+- validation
+
+Never invalidate cache unnecessarily.
+
+---
+
+17. AI DECISION CONTRACT
+
+AI output must be structured.
+
+Example:
+
+{
+  "decision": "USE_BENCHMARK_ELEMENT",
+  "benchmark": "MFA",
+  "sourceElement": "BenefitElement",
+  "confidence": 0.94,
+  "changes": [
+    {
+      "type": "RENAME",
+      "from": "MFA",
+      "to": "NEW"
+    },
+    {
+      "type": "BINDING_CHANGE",
+      "field": "BenefitAmount",
+      "source": "ProductEngine.BenefitAmount"
+    }
+  ],
+  "reasoningSummary": "...",
+  "requiresHumanReview": false
+}
+
+AI must return structured decisions, not arbitrary source files.
+
+---
+
+18. PROPOSAL DEFINITION
+
+Create a canonical intermediate representation:
+
+ProposalDefinition
+
+It must represent:
+
+- Product
+- Plan
+- Benchmark
+- Sections
+- Elements
+- Source files
+- RDLCs
+- fields
+- bindings
+- business logic references
+- changes
+- validation rules
+- sample data
+- confidence
+- provenance
+- approval state
+
+Example:
+
+{
+  "productCode": "NEW",
+  "benchmark": "MFA",
+  "sections": [
+    {
+      "name": "Benefit",
+      "sourceBenchmark": "MFA",
+      "sourceElement": "BenefitElement",
+      "rdlc": "MFABenefit.rdlc",
+      "changes": [],
+      "validationRules": []
+    }
+  ]
+}
+
+ProposalDefinition is the contract between AI and deterministic generation.
+
+---
+
+19. PRODUCTENGINE SAMPLE DATA
+
+Preview must work even if ProductEngine is not production-ready.
+
+Support controlled modes:
+
+RealProductEngine
+ReferencePdfData
+ExistingTestData
+DummyData
+ManualData
+
+Example:
+
+{
+  "field": "Premium",
+  "mode": "ReferencePdfData",
+  "sampleValue": 750000,
+  "productionSource": "ProductEngine.Premium"
+}
+
+Priority:
+
+1. Existing project test/fixture/mock data
+2. Reference PDF extracted values
+3. Deterministic dummy data
+4. Manual values
+
+Do NOT blindly comment arbitrary ProductEngine code.
+
+Do NOT rewrite business logic merely to make preview work.
+
+Use controlled adapters/mocks/test harnesses.
+
+---
+
+20. ACTUAL RDLC PREVIEW
+
+This is NON-NEGOTIABLE.
+
+Preview MUST execute the actual RDLC.
+
+Do NOT use:
+
+- HTML simulation
+- CSS approximation
+- fake PDF
+- screenshot mock
+- visual-only reconstruction
+
+Required flow:
+
+Generated VB.NET
++
+Generated RDLC 2008
++
+Sample Data
+↓
+Build
+↓
+Execute ProposalBuilder
+↓
+Build DataSet/DataTable
+↓
+Load actual RDLC
+↓
+Bind DataSources
+↓
+Apply Parameters
+↓
+Evaluate expressions
+↓
+Process Tablix
+↓
+Process Groups
+↓
+Process Visibility
+↓
+Render using compatible actual RDLC runtime
+↓
+Actual PDF
+
+If the existing production project already has a proven report execution/rendering mechanism, inspect and reuse it.
+
+Do not create a parallel report runtime unnecessarily.
+
+---
+
+21. RDLC 2008
+
+Treat RDLC 2008 as a hard compatibility requirement.
+
+Understand:
+
+- Report
+- DataSources
+- DataSets
+- Tablix
+- Rows
+- Columns
+- Cells
+- TextBoxes
+- Images
+- Rectangles
+- Groups
+- Expressions
+- Parameters
+- Visibility
+- PageBreaks
+- Width
+- Height
+- Borders
+- Padding
+- Fonts
+- Alignment
+- Page settings
+
+Prefer modifying benchmark RDLC over reconstructing RDLC from PDF.
+
+---
+
+22. BUILD GATE
+
+Every modified VB.NET artifact must pass:
+
+VB.NET Parse
+↓
+Syntax validation
+↓
+Build / Compile
+↓
+PASS / FAIL
+
+If compilation fails:
+
+- capture exact compiler error
+- identify changed symbol
+- identify changed region
+- mark failure
+- provide diagnosis
+- do NOT regenerate entire Proposal blindly
+
+---
+
+23. REPORT TEST HARNESS
+
+Preview is also a test harness.
+
+Required validation:
+
+VB.NET Syntax          PASS
+Build / Compile        PASS
+Data Binding           PASS
+RDLC Structure         PASS
+RDLC 2008 Compatibility PASS
+Report Execution       PASS
+RDLC Rendering         PASS
+Page Count             PASS
+Page Dimensions        PASS
+Expected Sections      PASS
+Expected Fields        PASS
+Visual Comparison      PASS/WARN/FAIL
+
+If rendering fails:
+
+RENDER FAILED
+
+Never report a successful preview if actual RDLC rendering did not occur.
+
+---
+
+24. VISUAL COMPARISON
+
+Compare actual rendered PDF with PDF A.
+
+Check:
+
+- page count
+- page size
+- text position
+- table structure
+- spacing
+- alignment
+- borders
+- images
+- missing elements
+- extra elements
+- section ordering
+- pagination
+- font/formatting where measurable
+
+Do NOT rely only on one similarity score.
+
+Produce actionable diagnostics.
+
+Example:
+
+Visual Score: 97.8%
+
+PASS
+- Page count
+- Section ordering
+- Table structure
+
+WARN
+- Benefit table shifted 3px right
+- Signature section 5px lower
+
+FAIL
+- Missing Status field on page 4
+
+---
+
+25. STAGING
+
+Generated files must NEVER be written directly to the real project.
+
+Use:
+
+workspace/
+├── analysis/
+│   ├── project-analysis.json
+│   ├── technology-profile.json
+│   ├── benchmark-analysis.json
+│   ├── template-analysis.json
+│   └── dummy-data.json
+│
+├── decision/
+│   ├── differential-analysis.json
+│   └── proposal-definition.json
+│
+├── generated/
+│   └── NEWPLAN/
+│       ├── NEWPLANProposalBuilder.vb
+│       ├── NEWPLANProposalElement.vb
+│       └── NEWPLANProposalLayout.rdlc
+│
+├── test/
+│   ├── test-results.json
+│   ├── validation-report.json
+│   └── visual-comparison.json
+│
+└── insert/
+    └── insert-manifest.json
+
+The real project is never the AI workspace.
+
+---
+
+26. CLI INSERT
+
+Only permit insertion after:
+
+Build PASS
++
+Report Execution PASS
++
+Rendering PASS
++
+Validation PASS
++
+Visual Comparison PASS/WARN
++
+Explicit User Approval
+
+CLI:
+
+proposal-cli insert --dry-run
+proposal-cli insert --confirm
+
+Default behavior:
+
+NO SILENT OVERWRITE
+
+Collision:
+
+ABORT
+
+unless explicitly approved.
+
+Generate insert manifest containing:
+
+- ProductCode
+- PlanCode
+- benchmark
+- source paths
+- destination paths
+- hashes
+- inserted files
+- modified files
+- backup
+- validation result
+- approval
+- timestamp
+- warnings
+
+After insertion verify:
+
+VB.NET
+RDLC
+project references
+build
+report execution
+rendering
+
+---
+
+27. CHANGE SAFETY
+
+Never:
+
+- modify unrelated Proposal products
+- perform global string replacement
+- rewrite entire source files unnecessarily
+- migrate VB.NET
+- migrate .NET Framework unnecessarily
+- upgrade RDLC unnecessarily
+- rewrite ProductEngine
+- introduce microservices
+- introduce Kafka
+- introduce Redis
+- introduce cloud infrastructure unnecessarily
+- introduce Vector DB without abstraction
+- overwrite silently
+- invent business logic
+- bypass the production report execution mechanism
+
+---
+
+28. AI TOKEN OPTIMIZATION
+
+The system must explicitly optimize AI cost.
+
+Use:
+
+Deterministic preprocessing
+→ exact retrieval
+→ structured retrieval
+→ vector retrieval
+→ reranking
+→ minimal context
+→ cheapest capable model
+→ escalation only when necessary
+
+Track:
+
+LLM calls
+Input tokens
+Output tokens
+Embedding calls
+Cache hits
+Cache misses
+Retrieval latency
+AI latency
+Total processing time
+
+Produce an AI execution telemetry report.
+
+Example:
+
+LLM Calls: 2
+Embedding Calls: 14
+Cache Hit Rate: 91%
+Input Tokens: 8,430
+Output Tokens: 1,820
+Total AI Cost: ...
+Total Processing Time: ...
+
+The objective is NOT maximum AI usage.
+
+The objective is:
+
+MINIMUM AI
+for
+MAXIMUM CORRECTNESS
+
+---
+
+29. HISTORICAL DECISION MEMORY
+
+Every approved decision should be stored.
+
+Example:
+
+Target Pattern
+→ Benchmark
+→ Element
+→ RDLC
+→ Mapping
+→ User Approval
+→ Validation Result
+
+Store approved and rejected decisions.
+
+Future retrieval can use this history.
+
+Do NOT fine-tune a model for MVP.
+
+Use structured decision memory + embeddings first.
+
+---
+
+30. CONFIDENCE
+
+AI confidence must not be the only confidence.
+
+Calculate overall confidence from:
+
+AI confidence
++
+retrieval confidence
++
+structural verification
++
+dependency verification
++
+build result
++
+render result
++
+visual comparison
+
+Example:
+
+AI Semantic Confidence      0.94
+Structural Verification     PASS
+Dependency Verification    PASS
+Compilation                 PASS
+Rendering                   PASS
+Visual Similarity           97.8%
+
+Final Decision:
+HIGH CONFIDENCE
+
+---
+
+31. ERROR HANDLING
+
+Failures must be explicit.
+
+Examples:
+
+TECHNOLOGY_DETECTION_FAILED
+VB_PARSE_FAILED
+BENCHMARK_NOT_FOUND
+AMBIGUOUS_BENCHMARK
+RDLC_REFERENCE_UNRESOLVED
+DATA_BINDING_FAILED
+VB_COMPILE_FAILED
+REPORT_EXECUTION_FAILED
+RDLC_RENDER_FAILED
+VISUAL_VALIDATION_FAILED
+INSERT_COLLISION
+APPROVAL_REQUIRED
+
+Never hide errors.
+
+Never silently fall back to a different technology.
+
+---
+
+32. IMPLEMENTATION PHASES
+
+Implement incrementally.
+
+Do NOT build the entire system in one giant implementation.
+
+Phase 1
+
+Project Scanner + Product Discovery
+
+Phase 2
+
+Technology Profile
+
+Phase 3
+
+ProposalBuilder / ProposalElement / RDLC dependency graph
+
+Phase 4
+
+Benchmark Inspector
+
+Phase 5
+
+Two-PDF Analyzer
+
+Phase 6
+
+Reference PDF Sample Data Extraction
+
+Phase 7
+
+Hybrid Retrieval + Knowledge Graph + Vector indexing
+
+Phase 8
+
+Differential Analysis
+
+Phase 9
+
+ProposalDefinition
+
+Phase 10
+
+Minimal-Mutation VB.NET Transformation
+
+Phase 11
+
+Minimal-Mutation RDLC 2008 Transformation
+
+Phase 12
+
+Actual VB.NET Build + ProductEngine/Test Data Harness
+
+Phase 13
+
+Actual RDLC Execution + Rendering
+
+Phase 14
+
+Report Test Harness
+
+Phase 15
+
+Visual Comparison
+
+Phase 16
+
+Staging + Approval + CLI Insert
+
+Phase 17
+
+AI orchestration / LangChain optimization
+
+Phase 18
+
+Historical decision memory
+
+Phase 19
+
+Performance / token / cache optimization
+
+Do not implement future phases prematurely.
+
+Each phase must have:
+
+Implementation
+→ Tests
+→ Verification
+→ Result
+→ Known limitations
+
+---
+
+33. TECHNOLOGY SELECTION RULE
+
+Do not use technology merely because it exists.
+
+Use a technology only when it improves:
+
+- accuracy
+- speed
+- token efficiency
+- maintainability
+- retrieval quality
+- determinism
+- traceability
+
+Potential technologies:
+
+VB.NET parser / compiler tooling
+AST / symbol analysis
+PDF parser
+OCR
+Embeddings
+Vector DB
+RAG
+LangChain
+Agents
+Reranker
+Knowledge Graph
+SQLite / structured metadata store
+Caching
+LLM routing
+
+Do NOT automatically introduce:
+
+PostgreSQL
+Redis
+Kafka
+Microservices
+Cloud infrastructure
+Fine-tuning
+
+unless inspection proves they are necessary.
+
+---
+
+34. REQUIRED FINAL ARCHITECTURE
+
+The intended architecture is:
+
+                    USER
+                     │
+                     ▼
+                ORCHESTRATOR
+                     │
+          ┌──────────┴──────────┐
+          │                     │
+   DETERMINISTIC ENGINE     AI/RAG ENGINE
+          │                     │
+    ┌─────┼─────┐         ┌────┼────┐
+    │     │     │         │    │    │
+   VB    RDLC   PDF      RAG Agent LLM
+ Parser Parser Parser       │
+    │     │     │           │
+    └─────┼─────┘       Vector DB
+          │                  │
+          ▼                  │
+    KNOWLEDGE GRAPH ◄────────┘
+          │
+          ▼
+   STRUCTURED STORE
+          │
+          ▼
+   CONTEXT COMPILER
+          │
+          ▼
+      AI DECISION
+          │
+          ▼
+   PROPOSAL DEFINITION
+          │
+          ▼
+ DETERMINISTIC TRANSFORMER
+          │
+          ▼
+    VB.NET + RDLC 2008
+          │
+          ▼
+       REAL BUILD
+          │
+          ▼
+    REAL RDLC RENDER
+          │
+          ▼
+    TEST + VALIDATION
+          │
+          ▼
+   VISUAL COMPARISON
+          │
+          ▼
+       APPROVAL
+          │
+          ▼
+       CLI INSERT
+
+---
+
+35. GOLDEN RULE
+
+The final system must embody:
+
+COPY
+→ RENAME
+→ UNDERSTAND DIFFERENCES
+→ MINIMAL MUTATION
+→ REUSE PROVEN VB.NET LOGIC
+→ SAMPLE DATA
+→ BUILD
+→ ACTUAL RDLC 2008 EXECUTION
+→ ACTUAL RDLC RENDERING
+→ TEST
+→ COMPARE
+→ APPROVE
+→ INSERT
+
+AI provides intelligence.
+
+RAG provides relevant knowledge.
+
+Vector DB provides semantic retrieval.
+
+Knowledge Graph provides structural truth.
+
+LangChain/Agents provide controlled orchestration.
+
+Deterministic code provides consistency.
+
+Existing VB.NET/RDLC provides implementation truth.
+
+ProposalBuilder provides the primary implementation entry point.
+
+ProposalBuilder → ProposalElement → RDLC forms the dependency graph.
+
+ProposalDefinition provides the canonical decision contract.
+
+Compiler + actual RDLC renderer provide proof.
+
+---
+
+36. FIRST ACTION
+
+Before implementing anything:
+
+1. Inspect the repository.
+2. Detect the actual technology.
+3. Identify the existing Proposal architecture.
+4. Locate ProposalBuilder.vb.
+5. Locate ProposalElement.vb.
+6. Identify all RDLCs.
+7. Build ProposalBuilder → Element → RDLC dependency graph.
+8. Identify ProductEngine dependencies.
+9. Identify report execution/rendering mechanism.
+10. Identify existing tests and mock data.
+11. Identify existing PDF tooling.
+12. Identify available AI/RAG infrastructure.
+13. Identify whether LangChain is already present.
+14. Identify whether Vector DB is already present.
+15. Identify whether embeddings/cache already exist.
+16. Produce the inspection report.
+17. DO NOT modify production source yet.
+
+The inspection report must explicitly state:
+
+WHAT EXISTS
+WHAT IS MISSING
+WHAT SHOULD BE REUSED
+WHAT SHOULD BE BUILT
+WHAT SHOULD NOT BE BUILT
+WHY
+
+Only after that proceed to Phase 1.
+
+DO NOT make assumptions about the existing project.
+
+DO NOT redesign working business logic.
+
+DO NOT confuse the automation application's technology with the existing VB.NET project's technology.
+
+DO NOT optimize for "more AI".
+
+Optimize for:
+
+ACCURACY
++
+DETERMINISM
++
+LOW TOKEN COST
++
+LOW LATENCY
++
+REUSABILITY
++
+TRACEABILITY
++
+SAFE PRODUCTION INSERTION

@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Insurance.Proposal.Reports</RootNamespace>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <OptionStrict>On</OptionStrict>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Proposal\MFA\MFAProposalBuilder.vb" />
+    <Compile Include="Proposal\MFA\MFAProposalElement.vb" />
+    <Compile Include="Proposal\MFA\MFABenefitElement.vb" />
+    <EmbeddedResource Include="Proposal\MFA\MFAProposalLayout.rdlc" />
+    <EmbeddedResource Include="Proposal\MFA\MFABenefit.rdlc" />
+    <Compile Include="Proposal\ABC\ABCProposalBuilder.vb" />
+  </ItemGroup>
+</Project>

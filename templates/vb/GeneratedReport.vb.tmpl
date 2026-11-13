@@ -1,0 +1,21 @@
+Imports System
+Imports System.Data
+Imports System.Collections.Generic
+
+Namespace {{Namespace}}
+    Public Class {{ClassName}}
+        ''' <summary>
+        ''' Deterministic DataTable builder matching RDLC DataSet "{{DataSetName}}".
+        ''' Production callers bind domain entities or ADO.NET sources here.
+        ''' </summary>
+        Public Function GetReportData() As DataTable
+            Dim dt As New DataTable("{{DataSetName}}")
+{{DataTableColumns}}
+            Return dt
+        End Function
+
+{{CalculationFunctions}}
+
+{{FormattingFunctions}}
+    End Class
+End Namespace

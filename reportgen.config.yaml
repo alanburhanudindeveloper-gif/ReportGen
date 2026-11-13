@@ -1,0 +1,42 @@
+project:
+  name: MyERP
+  outputPath: output
+
+pdf:
+  coordinateTolerance: 0.04
+  imageFallback: true
+  dpi: 144
+
+ai:
+  enabled: true
+  provider: gemini
+  model: gemini-3.8-flash
+  confidenceThreshold: 0.85
+  confidenceTiers:
+    high: 0.90
+    medium: 0.70
+
+validation:
+  visualSimilarityTarget: 0.95
+  maxAgentIterations: 3
+  maxDiagnosisRetries: 3
+  requirePassingLogicTests: true
+
+security:
+  allowedInputDirs:
+    - samples
+    - uploads
+    - tmp
+    - output
+  allowedOutputDirs:
+    - output
+    - samples
+    - tmp
+  allowedExtensions:
+    - .pdf
+    - .rdlc
+    - .vb
+    - .xlsx
+    - .json
+    - .vbproj
+    - .csproj

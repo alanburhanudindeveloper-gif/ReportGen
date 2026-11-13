@@ -1,0 +1,511 @@
+{
+  "productCode": "MFA",
+  "planCodes": [
+    "MFA-STD"
+  ],
+  "cacheKey": "MFA_07cb337b357da082",
+  "analyzedAt": "2026-11-13T14:32:00.477Z",
+  "builderClassName": "MFAProposalBuilder",
+  "elementClassName": "MFAProposalElement",
+  "namespaceName": "Insurance.Proposal.Reports",
+  "dataSourceName": "MFADataSource",
+  "dataSetName": "MFAProposalDataSet",
+  "fields": [
+    {
+      "name": "PolicyHolderName",
+      "dataType": "System.String"
+    },
+    {
+      "name": "AnnualPremium",
+      "dataType": "System.Decimal"
+    },
+    {
+      "name": "SumAssured",
+      "dataType": "System.Decimal"
+    },
+    {
+      "name": "RiderStatus",
+      "dataType": "System.String"
+    }
+  ],
+  "parameters": [
+    "ProductCode",
+    "PlanCode"
+  ],
+  "methods": [
+    {
+      "name": "BuildProposalDataSet",
+      "signature": "Public Function BuildProposalDataSet(ByVal policyHolder As String, ByVal engine As Object) As DataSet",
+      "sourceFile": "MFAProposalBuilder.vb",
+      "lineNumber": 10
+    },
+    {
+      "name": "ComputeIllustrationChecksum",
+      "signature": "Public Function ComputeIllustrationChecksum(ByVal premium As Decimal, ByVal sumAssured As Decimal) As Decimal",
+      "sourceFile": "MFAProposalBuilder.vb",
+      "lineNumber": 38
+    },
+    {
+      "name": "BuildCoverageSummaryElement",
+      "signature": "Public Shared Function BuildCoverageSummaryElement(ByVal row As DataRow) As Dictionary(Of String, Object)",
+      "sourceFile": "MFAProposalElement.vb",
+      "lineNumber": 7
+    },
+    {
+      "name": "BuildBenefitScheduleElement",
+      "signature": "Public Shared Function BuildBenefitScheduleElement(ByVal row As DataRow) As Dictionary(Of String, Object)",
+      "sourceFile": "MFAProposalElement.vb",
+      "lineNumber": 15
+    },
+    {
+      "name": "BuildLegacyNotesElement",
+      "signature": "Public Shared Function BuildLegacyNotesElement(ByVal row As DataRow) As Dictionary(Of String, Object)",
+      "sourceFile": "MFAProposalElement.vb",
+      "lineNumber": 23
+    },
+    {
+      "name": "GetReportTemplateName",
+      "signature": "Public Function GetReportTemplateName() As String",
+      "sourceFile": "MFABenefitElement.vb",
+      "lineNumber": 7
+    },
+    {
+      "name": "BuildBenefitScheduleElement",
+      "signature": "Public Function BuildBenefitScheduleElement(ByVal row As DataRow) As Dictionary(Of String, Object)",
+      "sourceFile": "MFABenefitElement.vb",
+      "lineNumber": 11
+    }
+  ],
+  "elements": [
+    {
+      "symbolName": "BuildCoverageSummaryElement",
+      "className": "MFAProposalElement",
+      "labelHint": "Coverage Summary",
+      "referencedFields": [
+        "PolicyHolderName",
+        "SumAssured"
+      ],
+      "usesProductEngine": false,
+      "sourceFile": "MFAProposalElement.vb",
+      "lineNumber": 7,
+      "startLine": 7,
+      "endLine": 13
+    },
+    {
+      "symbolName": "BuildBenefitScheduleElement",
+      "className": "MFAProposalElement",
+      "labelHint": "Benefit Schedule",
+      "referencedFields": [
+        "AnnualPremium",
+        "RiderStatus"
+      ],
+      "usesProductEngine": false,
+      "sourceFile": "MFAProposalElement.vb",
+      "lineNumber": 15,
+      "startLine": 15,
+      "endLine": 21
+    },
+    {
+      "symbolName": "BuildLegacyNotesElement",
+      "className": "MFAProposalElement",
+      "labelHint": "Legacy Notes",
+      "referencedFields": [],
+      "usesProductEngine": false,
+      "sourceFile": "MFAProposalElement.vb",
+      "lineNumber": 23,
+      "startLine": 23,
+      "endLine": 28
+    },
+    {
+      "symbolName": "BuildBenefitScheduleElement",
+      "className": "MFABenefitElement",
+      "labelHint": "Benefit Schedule",
+      "referencedFields": [
+        "AnnualPremium",
+        "RiderStatus"
+      ],
+      "usesProductEngine": false,
+      "sourceFile": "MFABenefitElement.vb",
+      "lineNumber": 11,
+      "startLine": 11,
+      "endLine": 18
+    }
+  ],
+  "expressions": [
+    "=Fields!PolicyHolderName.Value",
+    "=IIf(Fields!RiderStatus.Value = \"Included\", \"Included\", \"Optional\")",
+    "=Fields!AnnualPremium.Value",
+    "=Fields!RiderStatus.Value"
+  ],
+  "visibilityRules": [],
+  "tablixNames": [
+    "Tablix_MFASummary",
+    "Tablix_MFABenefitSchedule"
+  ],
+  "pageSettings": {
+    "pageWidthIn": 8.5,
+    "pageHeightIn": 11,
+    "marginsIn": {
+      "top": 0.4,
+      "right": 0.4,
+      "bottom": 0.4,
+      "left": 0.4
+    }
+  },
+  "productEngineBindings": [
+    {
+      "field": "PolicyHolderName",
+      "expression": "ProductEngine.CalculateAnnualPremium",
+      "lineNumber": 10
+    },
+    {
+      "field": "PolicyHolderName",
+      "expression": "ProductEngine.GetBaseSumAssured",
+      "lineNumber": 10
+    }
+  ],
+  "mockCommentMarkers": [],
+  "rawBuilderSource": "Imports System\nImports System.Data\nImports System.Collections.Generic\n\nNamespace Insurance.Proposal.Reports\n    Public Class MFAProposalBuilder\n        Public Shared ReadOnly ProductCode As String = \"MFA\"\n        Public Shared ReadOnly PlanCode As String = \"MFA-STD\"\n\n        Public Function BuildProposalDataSet(ByVal policyHolder As String, ByVal engine As Object) As DataSet\n            Dim ds As New DataSet(\"MFADataSource\")\n            Dim dt As New DataTable(\"MFAProposalDataSet\")\n            dt.Columns.Add(\"PolicyHolderName\", GetType(System.String))\n            dt.Columns.Add(\"AnnualPremium\", GetType(System.Decimal))\n            dt.Columns.Add(\"SumAssured\", GetType(System.Decimal))\n            dt.Columns.Add(\"RiderStatus\", GetType(System.String))\n\n            Dim row As DataRow = dt.NewRow()\n            row(\"PolicyHolderName\") = policyHolder\n            row(\"AnnualPremium\") = ProductEngine.CalculateAnnualPremium(\"MFA\", \"MFA-STD\")\n            row(\"SumAssured\") = ProductEngine.GetBaseSumAssured(\"MFA\", \"MFA-STD\")\n            row(\"RiderStatus\") = \"Included\"\n            dt.Rows.Add(row)\n\n            Dim summaryEl As New MFAProposalElement()\n            Dim benefitEl As New MFABenefitElement()\n            Dim coverData = summaryEl.BuildCoverageSummaryElement(row)\n            Dim scheduleData = benefitEl.BuildBenefitScheduleElement(row)\n            Dim disclaimerData = MFAProposalElement.BuildLegacyNotesElement(row)\n\n            Dim primaryReportName As String = \"MFAProposalLayout.rdlc\"\n            Dim secondaryReportName As String = benefitEl.GetReportTemplateName()\n\n            ds.Tables.Add(dt)\n            Return ds\n        End Function\n\n        Public Function ComputeIllustrationChecksum(ByVal premium As Decimal, ByVal sumAssured As Decimal) As Decimal\n            If sumAssured <= 0D Then Return 0D\n            Return Math.Round((premium / sumAssured) * 1000D, 4)\n        End Function\n    End Class\nEnd Namespace\n",
+  "rawElementSource": "Imports System\nImports System.Data\nImports System.Collections.Generic\n\nNamespace Insurance.Proposal.Reports\n    Public Class MFAProposalElement\n        Public Shared Function BuildCoverageSummaryElement(ByVal row As DataRow) As Dictionary(Of String, Object)\n            Dim element As New Dictionary(Of String, Object)()\n            element(\"Title\") = \"Coverage Summary\"\n            element(\"PolicyHolderName\") = row(\"PolicyHolderName\")\n            element(\"SumAssured\") = row(\"SumAssured\")\n            Return element\n        End Function\n\n        Public Shared Function BuildBenefitScheduleElement(ByVal row As DataRow) As Dictionary(Of String, Object)\n            Dim element As New Dictionary(Of String, Object)()\n            element(\"Title\") = \"Benefit Schedule\"\n            element(\"AnnualPremium\") = row(\"AnnualPremium\")\n            element(\"RiderStatus\") = row(\"RiderStatus\")\n            Return element\n        End Function\n\n        Public Shared Function BuildLegacyNotesElement(ByVal row As DataRow) As Dictionary(Of String, Object)\n            Dim element As New Dictionary(Of String, Object)()\n            element(\"Title\") = \"Legacy Terms\"\n            element(\"Notes\") = \"Standard MFA terms apply.\"\n            Return element\n        End Function\n    End Class\nEnd Namespace\n",
+  "rawElementSources": [
+    {
+      "fileName": "MFAProposalElement.vb",
+      "filePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalElement.vb",
+      "source": "Imports System\nImports System.Data\nImports System.Collections.Generic\n\nNamespace Insurance.Proposal.Reports\n    Public Class MFAProposalElement\n        Public Shared Function BuildCoverageSummaryElement(ByVal row As DataRow) As Dictionary(Of String, Object)\n            Dim element As New Dictionary(Of String, Object)()\n            element(\"Title\") = \"Coverage Summary\"\n            element(\"PolicyHolderName\") = row(\"PolicyHolderName\")\n            element(\"SumAssured\") = row(\"SumAssured\")\n            Return element\n        End Function\n\n        Public Shared Function BuildBenefitScheduleElement(ByVal row As DataRow) As Dictionary(Of String, Object)\n            Dim element As New Dictionary(Of String, Object)()\n            element(\"Title\") = \"Benefit Schedule\"\n            element(\"AnnualPremium\") = row(\"AnnualPremium\")\n            element(\"RiderStatus\") = row(\"RiderStatus\")\n            Return element\n        End Function\n\n        Public Shared Function BuildLegacyNotesElement(ByVal row As DataRow) As Dictionary(Of String, Object)\n            Dim element As New Dictionary(Of String, Object)()\n            element(\"Title\") = \"Legacy Terms\"\n            element(\"Notes\") = \"Standard MFA terms apply.\"\n            Return element\n        End Function\n    End Class\nEnd Namespace\n"
+    },
+    {
+      "fileName": "MFABenefitElement.vb",
+      "filePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefitElement.vb",
+      "source": "Imports System\nImports System.Data\nImports System.Collections.Generic\n\nNamespace Insurance.Proposal.Reports\n    Public Class MFABenefitElement\n        Public Function GetReportTemplateName() As String\n            Return \"MFABenefit.rdlc\"\n        End Function\n\n        Public Function BuildBenefitScheduleElement(ByVal row As DataRow) As Dictionary(Of String, Object)\n            Dim element As New Dictionary(Of String, Object)()\n            element(\"Title\") = \"Benefit Schedule\"\n            element(\"ReportName\") = \"MFABenefit.rdlc\"\n            element(\"AnnualPremium\") = row(\"AnnualPremium\")\n            element(\"RiderStatus\") = row(\"RiderStatus\")\n            Return element\n        End Function\n    End Class\nEnd Namespace\n"
+    }
+  ],
+  "rawLayoutXml": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Report xmlns=\"http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition\" xmlns:rd=\"http://schemas.microsoft.com/SQLServer/reporting/reportdesigner\">\n  <DataSources>\n    <DataSource Name=\"MFADataSource\">\n      <ConnectionProperties>\n        <DataProvider>System.Data.DataSet</DataProvider>\n        <ConnectString>/* Local Connection */</ConnectString>\n      </ConnectionProperties>\n      <rd:DataSourceID>11111111-1111-4111-8111-111111111111</rd:DataSourceID>\n    </DataSource>\n  </DataSources>\n  <DataSets>\n    <DataSet Name=\"MFAProposalDataSet\">\n      <Query>\n        <DataSourceName>MFADataSource</DataSourceName>\n        <CommandText>/* Local Query */</CommandText>\n      </Query>\n      <Fields>\n        <Field Name=\"PolicyHolderName\"><DataField>PolicyHolderName</DataField><rd:TypeName>System.String</rd:TypeName></Field>\n        <Field Name=\"AnnualPremium\"><DataField>AnnualPremium</DataField><rd:TypeName>System.Decimal</rd:TypeName></Field>\n        <Field Name=\"SumAssured\"><DataField>SumAssured</DataField><rd:TypeName>System.Decimal</rd:TypeName></Field>\n        <Field Name=\"RiderStatus\"><DataField>RiderStatus</DataField><rd:TypeName>System.String</rd:TypeName></Field>\n      </Fields>\n    </DataSet>\n  </DataSets>\n  <Body>\n    <ReportItems>\n      <Tablix Name=\"Tablix_MFASummary\">\n        <TablixBody>\n          <TablixColumns>\n            <TablixColumn><Width>3.5in</Width></TablixColumn>\n            <TablixColumn><Width>3.5in</Width></TablixColumn>\n          </TablixColumns>\n          <TablixRows>\n            <TablixRow>\n              <Height>0.35in</Height>\n              <TablixCells>\n                <TablixCell>\n                  <CellContents>\n                    <Textbox Name=\"txtPolicyHolder\">\n                      <CanGrow>true</CanGrow>\n                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>=Fields!PolicyHolderName.Value</Value><Style /></TextRun></TextRuns><Style /></Paragraph></Paragraphs>\n                      <Style />\n                    </Textbox>\n                  </CellContents>\n                </TablixCell>\n                <TablixCell>\n                  <CellContents>\n                    <Textbox Name=\"txtRiderStatus\">\n                      <CanGrow>true</CanGrow>\n                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>=IIf(Fields!RiderStatus.Value = \"Included\", \"Included\", \"Optional\")</Value><Style /></TextRun></TextRuns><Style /></Paragraph></Paragraphs>\n                      <Style />\n                    </Textbox>\n                  </CellContents>\n                </TablixCell>\n              </TablixCells>\n            </TablixRow>\n          </TablixRows>\n        </TablixBody>\n        <TablixColumnHierarchy><TablixMembers><TablixMember /><TablixMember /></TablixMembers></TablixColumnHierarchy>\n        <TablixRowHierarchy><TablixMembers><TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember></TablixMembers></TablixRowHierarchy>\n        <DataSetName>MFAProposalDataSet</DataSetName>\n        <Top>0.5in</Top>\n        <Left>0.5in</Left>\n        <Height>0.35in</Height>\n        <Width>7.0in</Width>\n      </Tablix>\n    </ReportItems>\n    <Height>2in</Height>\n    <Style />\n  </Body>\n  <Width>7.7in</Width>\n  <Page>\n    <PageHeight>11in</PageHeight>\n    <PageWidth>8.5in</PageWidth>\n    <LeftMargin>0.4in</LeftMargin>\n    <RightMargin>0.4in</RightMargin>\n    <TopMargin>0.4in</TopMargin>\n    <BottomMargin>0.4in</BottomMargin>\n    <Style />\n  </Page>\n  <ReportParameters>\n    <ReportParameter Name=\"ProductCode\"><DataType>String</DataType><Nullable>true</Nullable><AllowBlank>true</AllowBlank><Prompt>ProductCode</Prompt></ReportParameter>\n    <ReportParameter Name=\"PlanCode\"><DataType>String</DataType><Nullable>true</Nullable><AllowBlank>true</AllowBlank><Prompt>PlanCode</Prompt></ReportParameter>\n  </ReportParameters>\n  <rd:ReportUnitType>Inch</rd:ReportUnitType>\n</Report>\n",
+  "rawLayoutXmls": [
+    {
+      "fileName": "MFAProposalLayout.rdlc",
+      "filePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalLayout.rdlc",
+      "xml": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Report xmlns=\"http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition\" xmlns:rd=\"http://schemas.microsoft.com/SQLServer/reporting/reportdesigner\">\n  <DataSources>\n    <DataSource Name=\"MFADataSource\">\n      <ConnectionProperties>\n        <DataProvider>System.Data.DataSet</DataProvider>\n        <ConnectString>/* Local Connection */</ConnectString>\n      </ConnectionProperties>\n      <rd:DataSourceID>11111111-1111-4111-8111-111111111111</rd:DataSourceID>\n    </DataSource>\n  </DataSources>\n  <DataSets>\n    <DataSet Name=\"MFAProposalDataSet\">\n      <Query>\n        <DataSourceName>MFADataSource</DataSourceName>\n        <CommandText>/* Local Query */</CommandText>\n      </Query>\n      <Fields>\n        <Field Name=\"PolicyHolderName\"><DataField>PolicyHolderName</DataField><rd:TypeName>System.String</rd:TypeName></Field>\n        <Field Name=\"AnnualPremium\"><DataField>AnnualPremium</DataField><rd:TypeName>System.Decimal</rd:TypeName></Field>\n        <Field Name=\"SumAssured\"><DataField>SumAssured</DataField><rd:TypeName>System.Decimal</rd:TypeName></Field>\n        <Field Name=\"RiderStatus\"><DataField>RiderStatus</DataField><rd:TypeName>System.String</rd:TypeName></Field>\n      </Fields>\n    </DataSet>\n  </DataSets>\n  <Body>\n    <ReportItems>\n      <Tablix Name=\"Tablix_MFASummary\">\n        <TablixBody>\n          <TablixColumns>\n            <TablixColumn><Width>3.5in</Width></TablixColumn>\n            <TablixColumn><Width>3.5in</Width></TablixColumn>\n          </TablixColumns>\n          <TablixRows>\n            <TablixRow>\n              <Height>0.35in</Height>\n              <TablixCells>\n                <TablixCell>\n                  <CellContents>\n                    <Textbox Name=\"txtPolicyHolder\">\n                      <CanGrow>true</CanGrow>\n                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>=Fields!PolicyHolderName.Value</Value><Style /></TextRun></TextRuns><Style /></Paragraph></Paragraphs>\n                      <Style />\n                    </Textbox>\n                  </CellContents>\n                </TablixCell>\n                <TablixCell>\n                  <CellContents>\n                    <Textbox Name=\"txtRiderStatus\">\n                      <CanGrow>true</CanGrow>\n                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>=IIf(Fields!RiderStatus.Value = \"Included\", \"Included\", \"Optional\")</Value><Style /></TextRun></TextRuns><Style /></Paragraph></Paragraphs>\n                      <Style />\n                    </Textbox>\n                  </CellContents>\n                </TablixCell>\n              </TablixCells>\n            </TablixRow>\n          </TablixRows>\n        </TablixBody>\n        <TablixColumnHierarchy><TablixMembers><TablixMember /><TablixMember /></TablixMembers></TablixColumnHierarchy>\n        <TablixRowHierarchy><TablixMembers><TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember></TablixMembers></TablixRowHierarchy>\n        <DataSetName>MFAProposalDataSet</DataSetName>\n        <Top>0.5in</Top>\n        <Left>0.5in</Left>\n        <Height>0.35in</Height>\n        <Width>7.0in</Width>\n      </Tablix>\n    </ReportItems>\n    <Height>2in</Height>\n    <Style />\n  </Body>\n  <Width>7.7in</Width>\n  <Page>\n    <PageHeight>11in</PageHeight>\n    <PageWidth>8.5in</PageWidth>\n    <LeftMargin>0.4in</LeftMargin>\n    <RightMargin>0.4in</RightMargin>\n    <TopMargin>0.4in</TopMargin>\n    <BottomMargin>0.4in</BottomMargin>\n    <Style />\n  </Page>\n  <ReportParameters>\n    <ReportParameter Name=\"ProductCode\"><DataType>String</DataType><Nullable>true</Nullable><AllowBlank>true</AllowBlank><Prompt>ProductCode</Prompt></ReportParameter>\n    <ReportParameter Name=\"PlanCode\"><DataType>String</DataType><Nullable>true</Nullable><AllowBlank>true</AllowBlank><Prompt>PlanCode</Prompt></ReportParameter>\n  </ReportParameters>\n  <rd:ReportUnitType>Inch</rd:ReportUnitType>\n</Report>\n",
+      "rdlcSchemaVersion": "2008"
+    },
+    {
+      "fileName": "MFABenefit.rdlc",
+      "filePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefit.rdlc",
+      "xml": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Report xmlns=\"http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition\" xmlns:rd=\"http://schemas.microsoft.com/SQLServer/reporting/reportdesigner\">\n  <DataSources>\n    <DataSource Name=\"MFADataSource\">\n      <ConnectionProperties>\n        <DataProvider>System.Data.DataSet</DataProvider>\n        <ConnectString>/* Local Connection */</ConnectString>\n      </ConnectionProperties>\n      <rd:DataSourceID>33333333-3333-4333-8333-333333333333</rd:DataSourceID>\n    </DataSource>\n  </DataSources>\n  <DataSets>\n    <DataSet Name=\"MFAProposalDataSet\">\n      <Query>\n        <DataSourceName>MFADataSource</DataSourceName>\n        <CommandText>/* Local Query */</CommandText>\n      </Query>\n      <Fields>\n        <Field Name=\"AnnualPremium\"><DataField>AnnualPremium</DataField><rd:TypeName>System.Decimal</rd:TypeName></Field>\n        <Field Name=\"RiderStatus\"><DataField>RiderStatus</DataField><rd:TypeName>System.String</rd:TypeName></Field>\n      </Fields>\n    </DataSet>\n  </DataSets>\n  <Body>\n    <ReportItems>\n      <Tablix Name=\"Tablix_MFABenefitSchedule\">\n        <TablixBody>\n          <TablixColumns>\n            <TablixColumn><Width>4.0in</Width></TablixColumn>\n            <TablixColumn><Width>3.0in</Width></TablixColumn>\n          </TablixColumns>\n          <TablixRows>\n            <TablixRow>\n              <Height>0.3in</Height>\n              <TablixCells>\n                <TablixCell>\n                  <CellContents>\n                    <Textbox Name=\"txtBenefitPremium\">\n                      <CanGrow>true</CanGrow>\n                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>=Fields!AnnualPremium.Value</Value><Style /></TextRun></TextRuns><Style /></Paragraph></Paragraphs>\n                      <Style />\n                    </Textbox>\n                  </CellContents>\n                </TablixCell>\n                <TablixCell>\n                  <CellContents>\n                    <Textbox Name=\"txtBenefitStatus\">\n                      <CanGrow>true</CanGrow>\n                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>=Fields!RiderStatus.Value</Value><Style /></TextRun></TextRuns><Style /></Paragraph></Paragraphs>\n                      <Style />\n                    </Textbox>\n                  </CellContents>\n                </TablixCell>\n              </TablixCells>\n            </TablixRow>\n          </TablixRows>\n        </TablixBody>\n        <TablixColumnHierarchy><TablixMembers><TablixMember /><TablixMember /></TablixMembers></TablixColumnHierarchy>\n        <TablixRowHierarchy><TablixMembers><TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember></TablixMembers></TablixRowHierarchy>\n        <DataSetName>MFAProposalDataSet</DataSetName>\n        <Top>0.3in</Top>\n        <Left>0.5in</Left>\n        <Height>0.3in</Height>\n        <Width>7.0in</Width>\n      </Tablix>\n    </ReportItems>\n    <Height>1.2in</Height>\n    <Style />\n  </Body>\n  <Width>7.7in</Width>\n  <Page>\n    <PageHeight>11in</PageHeight>\n    <PageWidth>8.5in</PageWidth>\n    <LeftMargin>0.4in</LeftMargin>\n    <RightMargin>0.4in</RightMargin>\n    <TopMargin>0.4in</TopMargin>\n    <BottomMargin>0.4in</BottomMargin>\n    <Style />\n  </Page>\n  <ReportParameters>\n    <ReportParameter Name=\"ProductCode\"><DataType>String</DataType><Nullable>true</Nullable><AllowBlank>true</AllowBlank><Prompt>ProductCode</Prompt></ReportParameter>\n  </ReportParameters>\n  <rd:ReportUnitType>Inch</rd:ReportUnitType>\n</Report>\n",
+      "rdlcSchemaVersion": "2008"
+    }
+  ],
+  "dependencyGraph": {
+    "productCode": "MFA",
+    "builderFile": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalBuilder.vb",
+    "builderClass": "MFAProposalBuilder",
+    "elements": [
+      {
+        "className": "MFAProposalElement",
+        "filePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalElement.vb",
+        "usedByMethods": [
+          "BuildProposalDataSet"
+        ],
+        "rdlcFiles": [],
+        "methods": [
+          "BuildCoverageSummaryElement",
+          "BuildBenefitScheduleElement",
+          "BuildLegacyNotesElement"
+        ],
+        "productEngineCalls": []
+      },
+      {
+        "className": "MFABenefitElement",
+        "filePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefitElement.vb",
+        "usedByMethods": [
+          "BuildProposalDataSet"
+        ],
+        "rdlcFiles": [
+          "MFABenefit.rdlc"
+        ],
+        "methods": [
+          "GetReportTemplateName",
+          "BuildBenefitScheduleElement"
+        ],
+        "productEngineCalls": []
+      }
+    ],
+    "rdlcFiles": [
+      {
+        "name": "MFAProposalLayout.rdlc",
+        "resolvedPath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalLayout.rdlc",
+        "referencedFrom": "MFAProposalBuilder.vb",
+        "datasets": [
+          "MFAProposalDataSet"
+        ]
+      },
+      {
+        "name": "MFABenefit.rdlc",
+        "resolvedPath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefit.rdlc",
+        "referencedFrom": "MFABenefitElement.vb",
+        "datasets": [
+          "MFAProposalDataSet"
+        ]
+      }
+    ],
+    "datasets": [
+      "MFADataSource",
+      "MFAProposalDataSet"
+    ],
+    "parameters": [
+      "ProductCode",
+      "PlanCode"
+    ],
+    "productEngineCalls": [
+      "ProductEngine.CalculateAnnualPremium",
+      "ProductEngine.GetBaseSumAssured"
+    ]
+  },
+  "builderAst": {
+    "filePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalBuilder.vb",
+    "fileName": "MFAProposalBuilder.vb",
+    "imports": [
+      "System",
+      "System.Data",
+      "System.Collections.Generic"
+    ],
+    "namespaces": [
+      "Insurance.Proposal.Reports"
+    ],
+    "types": [
+      {
+        "name": "MFAProposalBuilder",
+        "kind": "Class",
+        "namespaceName": "Insurance.Proposal.Reports",
+        "inherits": [],
+        "implementsList": [],
+        "methods": [
+          {
+            "name": "BuildProposalDataSet",
+            "kind": "Function",
+            "signature": "Public Function BuildProposalDataSet(ByVal policyHolder As String, ByVal engine As Object) As DataSet",
+            "startLine": 10,
+            "endLine": 36,
+            "bodyText": "        Public Function BuildProposalDataSet(ByVal policyHolder As String, ByVal engine As Object) As DataSet\n            Dim ds As New DataSet(\"MFADataSource\")\n            Dim dt As New DataTable(\"MFAProposalDataSet\")\n            dt.Columns.Add(\"PolicyHolderName\", GetType(System.String))\n            dt.Columns.Add(\"AnnualPremium\", GetType(System.Decimal))\n            dt.Columns.Add(\"SumAssured\", GetType(System.Decimal))\n            dt.Columns.Add(\"RiderStatus\", GetType(System.String))\n\n            Dim row As DataRow = dt.NewRow()\n            row(\"PolicyHolderName\") = policyHolder\n            row(\"AnnualPremium\") = ProductEngine.CalculateAnnualPremium(\"MFA\", \"MFA-STD\")\n            row(\"SumAssured\") = ProductEngine.GetBaseSumAssured(\"MFA\", \"MFA-STD\")\n            row(\"RiderStatus\") = \"Included\"\n            dt.Rows.Add(row)\n\n            Dim summaryEl As New MFAProposalElement()\n            Dim benefitEl As New MFABenefitElement()\n            Dim coverData = summaryEl.BuildCoverageSummaryElement(row)\n            Dim scheduleData = benefitEl.BuildBenefitScheduleElement(row)\n            Dim disclaimerData = MFAProposalElement.BuildLegacyNotesElement(row)\n\n            Dim primaryReportName As String = \"MFAProposalLayout.rdlc\"\n            Dim secondaryReportName As String = benefitEl.GetReportTemplateName()\n\n            ds.Tables.Add(dt)\n            Return ds\n        End Function",
+            "instantiations": [
+              "DataSet",
+              "DataTable",
+              "MFAProposalElement",
+              "MFABenefitElement"
+            ],
+            "rdlcReferences": [
+              "MFAProposalLayout.rdlc"
+            ],
+            "productEngineCalls": [
+              "ProductEngine.CalculateAnnualPremium",
+              "ProductEngine.GetBaseSumAssured"
+            ],
+            "elementCalls": [
+              "MFAProposalElement",
+              "MFABenefitElement",
+              "BuildCoverageSummaryElement",
+              "BuildBenefitScheduleElement",
+              "MFAProposalElement.BuildLegacyNotesElement"
+            ],
+            "referencedFields": [
+              "PolicyHolderName",
+              "AnnualPremium",
+              "SumAssured",
+              "RiderStatus"
+            ],
+            "tableColumns": [
+              "PolicyHolderName",
+              "AnnualPremium",
+              "SumAssured",
+              "RiderStatus"
+            ]
+          },
+          {
+            "name": "ComputeIllustrationChecksum",
+            "kind": "Function",
+            "signature": "Public Function ComputeIllustrationChecksum(ByVal premium As Decimal, ByVal sumAssured As Decimal) As Decimal",
+            "startLine": 38,
+            "endLine": 41,
+            "bodyText": "        Public Function ComputeIllustrationChecksum(ByVal premium As Decimal, ByVal sumAssured As Decimal) As Decimal\n            If sumAssured <= 0D Then Return 0D\n            Return Math.Round((premium / sumAssured) * 1000D, 4)\n        End Function",
+            "instantiations": [],
+            "rdlcReferences": [],
+            "productEngineCalls": [],
+            "elementCalls": [],
+            "referencedFields": [],
+            "tableColumns": []
+          }
+        ]
+      }
+    ],
+    "planCodes": [
+      "MFA-STD"
+    ],
+    "datasetNames": [
+      "MFADataSource",
+      "MFAProposalDataSet"
+    ],
+    "rdlcReferences": [
+      "MFAProposalLayout.rdlc"
+    ],
+    "productEngineCalls": [
+      "ProductEngine.CalculateAnnualPremium",
+      "ProductEngine.GetBaseSumAssured"
+    ]
+  },
+  "elementAsts": [
+    {
+      "filePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalElement.vb",
+      "fileName": "MFAProposalElement.vb",
+      "imports": [
+        "System",
+        "System.Data",
+        "System.Collections.Generic"
+      ],
+      "namespaces": [
+        "Insurance.Proposal.Reports"
+      ],
+      "types": [
+        {
+          "name": "MFAProposalElement",
+          "kind": "Class",
+          "namespaceName": "Insurance.Proposal.Reports",
+          "inherits": [],
+          "implementsList": [],
+          "methods": [
+            {
+              "name": "BuildCoverageSummaryElement",
+              "kind": "Function",
+              "signature": "Public Shared Function BuildCoverageSummaryElement(ByVal row As DataRow) As Dictionary(Of String, Object)",
+              "startLine": 7,
+              "endLine": 13,
+              "bodyText": "        Public Shared Function BuildCoverageSummaryElement(ByVal row As DataRow) As Dictionary(Of String, Object)\n            Dim element As New Dictionary(Of String, Object)()\n            element(\"Title\") = \"Coverage Summary\"\n            element(\"PolicyHolderName\") = row(\"PolicyHolderName\")\n            element(\"SumAssured\") = row(\"SumAssured\")\n            Return element\n        End Function",
+              "instantiations": [
+                "Dictionary"
+              ],
+              "rdlcReferences": [],
+              "productEngineCalls": [],
+              "elementCalls": [
+                "BuildCoverageSummaryElement"
+              ],
+              "referencedFields": [
+                "PolicyHolderName",
+                "SumAssured"
+              ],
+              "tableColumns": []
+            },
+            {
+              "name": "BuildBenefitScheduleElement",
+              "kind": "Function",
+              "signature": "Public Shared Function BuildBenefitScheduleElement(ByVal row As DataRow) As Dictionary(Of String, Object)",
+              "startLine": 15,
+              "endLine": 21,
+              "bodyText": "        Public Shared Function BuildBenefitScheduleElement(ByVal row As DataRow) As Dictionary(Of String, Object)\n            Dim element As New Dictionary(Of String, Object)()\n            element(\"Title\") = \"Benefit Schedule\"\n            element(\"AnnualPremium\") = row(\"AnnualPremium\")\n            element(\"RiderStatus\") = row(\"RiderStatus\")\n            Return element\n        End Function",
+              "instantiations": [
+                "Dictionary"
+              ],
+              "rdlcReferences": [],
+              "productEngineCalls": [],
+              "elementCalls": [
+                "BuildBenefitScheduleElement"
+              ],
+              "referencedFields": [
+                "AnnualPremium",
+                "RiderStatus"
+              ],
+              "tableColumns": []
+            },
+            {
+              "name": "BuildLegacyNotesElement",
+              "kind": "Function",
+              "signature": "Public Shared Function BuildLegacyNotesElement(ByVal row As DataRow) As Dictionary(Of String, Object)",
+              "startLine": 23,
+              "endLine": 28,
+              "bodyText": "        Public Shared Function BuildLegacyNotesElement(ByVal row As DataRow) As Dictionary(Of String, Object)\n            Dim element As New Dictionary(Of String, Object)()\n            element(\"Title\") = \"Legacy Terms\"\n            element(\"Notes\") = \"Standard MFA terms apply.\"\n            Return element\n        End Function",
+              "instantiations": [
+                "Dictionary"
+              ],
+              "rdlcReferences": [],
+              "productEngineCalls": [],
+              "elementCalls": [
+                "BuildLegacyNotesElement"
+              ],
+              "referencedFields": [],
+              "tableColumns": []
+            }
+          ]
+        }
+      ],
+      "planCodes": [],
+      "datasetNames": [],
+      "rdlcReferences": [],
+      "productEngineCalls": []
+    },
+    {
+      "filePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefitElement.vb",
+      "fileName": "MFABenefitElement.vb",
+      "imports": [
+        "System",
+        "System.Data",
+        "System.Collections.Generic"
+      ],
+      "namespaces": [
+        "Insurance.Proposal.Reports"
+      ],
+      "types": [
+        {
+          "name": "MFABenefitElement",
+          "kind": "Class",
+          "namespaceName": "Insurance.Proposal.Reports",
+          "inherits": [],
+          "implementsList": [],
+          "methods": [
+            {
+              "name": "GetReportTemplateName",
+              "kind": "Function",
+              "signature": "Public Function GetReportTemplateName() As String",
+              "startLine": 7,
+              "endLine": 9,
+              "bodyText": "        Public Function GetReportTemplateName() As String\n            Return \"MFABenefit.rdlc\"\n        End Function",
+              "instantiations": [],
+              "rdlcReferences": [
+                "MFABenefit.rdlc"
+              ],
+              "productEngineCalls": [],
+              "elementCalls": [],
+              "referencedFields": [],
+              "tableColumns": []
+            },
+            {
+              "name": "BuildBenefitScheduleElement",
+              "kind": "Function",
+              "signature": "Public Function BuildBenefitScheduleElement(ByVal row As DataRow) As Dictionary(Of String, Object)",
+              "startLine": 11,
+              "endLine": 18,
+              "bodyText": "        Public Function BuildBenefitScheduleElement(ByVal row As DataRow) As Dictionary(Of String, Object)\n            Dim element As New Dictionary(Of String, Object)()\n            element(\"Title\") = \"Benefit Schedule\"\n            element(\"ReportName\") = \"MFABenefit.rdlc\"\n            element(\"AnnualPremium\") = row(\"AnnualPremium\")\n            element(\"RiderStatus\") = row(\"RiderStatus\")\n            Return element\n        End Function",
+              "instantiations": [
+                "Dictionary"
+              ],
+              "rdlcReferences": [
+                "MFABenefit.rdlc"
+              ],
+              "productEngineCalls": [],
+              "elementCalls": [
+                "BuildBenefitScheduleElement"
+              ],
+              "referencedFields": [
+                "AnnualPremium",
+                "RiderStatus"
+              ],
+              "tableColumns": []
+            }
+          ]
+        }
+      ],
+      "planCodes": [],
+      "datasetNames": [],
+      "rdlcReferences": [
+        "MFABenefit.rdlc"
+      ],
+      "productEngineCalls": []
+    }
+  ]
+}
