@@ -1,23 +1,21 @@
-# AI Architecture & Context Engineering
+# AI Architecture & VS Code Agent Operating Model
 
-## Responsibility Boundary
-AI is strictly limited to ambiguous semantic decisions:
-- Determining whether short text is a `fieldLabel`, `fieldValue`, `tableHeader`, or `sectionHeading`.
-- Identifying `cardContainer`, `timelineStep`, or `calculationField` roles.
-- Confirming `preferImageFallback` on dense vector clusters.
-- Matching ambiguous fields against inspected existing RDLC field names.
+## Host-Agent Model vs. Deterministic Engine
+ReportGen is a **deterministic-first** PDF, RDLC, and VB.NET analysis, validation, and minimal-mutation engine.
+- By default (`ai.provider: none` in `reportgen.config.yaml`), **ReportGen makes zero external LLM API calls** and requires **no AI API keys**.
+- When operated from Visual Studio Code / Visual Studio, the **host AI Agent** (and the user's host-selected LLM) acts as the reasoning layer over ReportGen's compact, deterministic CLI and MCP-style tools (`READ_ONLY`, `VALIDATION`, `PROPOSAL`, `MUTATION`).
+- ReportGen never inspects or stores VS Code, GitHub, or Copilot credentials, never switches models silently, and **never falls back** to another LLM vendor if a provider is unavailable.
 
-AI **never**:
-- Calculates or modifies coordinates (`x`, `y`, `width`, `height`).
-- Emits raw RDLC XML or arbitrary VB.NET source files.
-- Modifies project files directly or executes shell commands.
+## Untrusted Document Data Boundary
+- All content extracted from `.pdf`, `.rdlc`, `.vb`, and `.xlsx` files is wrapped via `wrapUntrustedData()` (`_trustBoundary: 'UNTRUSTED_DOCUMENT_DATA'`, `treatAsInstructions: false`) and delimited inside `<untrusted_document_data>` blocks in `prompts.ts`.
+- Adversarial instruction strings inside documents (e.g., `"Ignore previous instructions"`) are flagged deterministically and never treated as commands.
 
-## Context Engineering & Token Efficiency
-`buildAiContextSlices` filters out all deterministically resolved regions and transmits **only** regions marked `isAmbiguous: true`, along with at most 4 nearby text labels and selectively loaded skill rules.
+## Optional Runtime LLM Gateway (`LLMGateway`)
+When a user explicitly opts in via `LLM_PROVIDER` (`gemini`, `openai`, `openai-compatible`, `claude`) + credentials:
+- Vendor SDKs remain strictly isolated inside `src/engine/ai/providers/`.
+- Only minimal slices (max 40 ambiguous regions, non-`HIGH` diff items, or compact benchmark metadata) are sent, never raw source trees.
+- If the configured provider is disabled or unavailable, ReportGen continues deterministically without silently calling any other LLM vendor.
 
-## Provider Abstraction (`IAiProvider`)
-- `GeminiAiProvider`: Uses `@google/genai` (`gemini-3.8-flash`) with strict `responseSchema` (`Type.OBJECT`) JSON output.
-- `DeterministicFallbackAiProvider`: Deterministic rule-based fallback used when `ai.enabled: false` or `GEMINI_API_KEY` is absent.
-
-## Retrieval Extensibility (`IContextRetriever`)
-`SkillManager` implements `IContextRetriever` using deterministic task/keyword selection today, allowing a vector or hybrid RAG retriever to be plugged in later without modifying `ReportGenAgent` or generators.
+## Fail-Closed Agent Tool Governance (`src/engine/mcp/mcpTools.ts`)
+- Every tool is classified into `READ_ONLY`, `VALIDATION`, `PROPOSAL`, or `MUTATION`.
+- `assertAgentToolApproval(toolName, { explicitApproval })` rejects unknown tools and refuses `MUTATION` tools unless explicit approval is provided.

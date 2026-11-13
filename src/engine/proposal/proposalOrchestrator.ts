@@ -6,6 +6,7 @@ import { ReportGenError, ReportGenErrorCode, StructuredLogger } from '../core/ty
 import { GridReconstructor } from '../pdf/gridReconstructor.ts';
 import { PdfAnalyzer } from '../pdf/pdfAnalyzer.ts';
 import { SkillManager } from '../skills/skillManager.ts';
+import { LLMGateway } from '../ai/llmGateway.ts';
 import { BenchmarkInspector } from './benchmarkInspector.ts';
 import { DifferentialAnalyzer } from './differentialAnalyzer.ts';
 import { applyManualFieldConfirmations, DummyDataExtractor } from './dummyDataExtractor.ts';
@@ -44,18 +45,19 @@ export class ProposalOrchestrator {
   private readonly testHarness: ReportTestHarness;
   private readonly stagingManager: StagingManager;
 
-  constructor(config?: ReportGenConfig, echoLogs = false) {
+  constructor(config?: ReportGenConfig, echoLogs = false, gatewayOverride?: LLMGateway) {
     this.config = config ?? loadConfig();
     this.logger = new StructuredLogger(echoLogs);
     const skillManager = new SkillManager(this.logger);
+    const llmGateway = gatewayOverride ?? new LLMGateway({ logger: this.logger, config: this.config });
 
     this.scanner = new ProjectScanner(this.logger);
-    this.discovery = new HybridBenchmarkDiscovery(this.logger);
+    this.discovery = new HybridBenchmarkDiscovery(this.logger, this.config, llmGateway);
     this.inspector = new BenchmarkInspector(this.logger);
     this.pdfAnalyzer = new PdfAnalyzer(this.logger);
     this.gridReconstructor = new GridReconstructor(this.logger);
     this.dummyExtractor = new DummyDataExtractor(this.logger, this.config.ai.confidenceThreshold);
-    this.diffAnalyzer = new DifferentialAnalyzer(this.logger, skillManager, this.config);
+    this.diffAnalyzer = new DifferentialAnalyzer(this.logger, skillManager, this.config, llmGateway);
     this.defBuilder = new ProposalDefinitionBuilder(this.logger);
     this.vbGenerator = new ProposalVbGenerator(this.logger);
     this.rdlcGenerator = new ProposalRdlcGenerator(this.logger);

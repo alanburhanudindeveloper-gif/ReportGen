@@ -17,6 +17,10 @@ export interface ReportGenConfig {
     enabled: boolean;
     provider: string;
     model: string;
+    baseUrl?: string;
+    timeoutMs?: number;
+    maxRetries?: number;
+    temperature?: number;
     confidenceThreshold: number;
     confidenceTiers: {
       high: number;
@@ -48,8 +52,10 @@ const DEFAULT_CONFIG: ReportGenConfig = {
   },
   ai: {
     enabled: true,
-    provider: 'gemini',
-    model: 'gemini-3.8-flash',
+    provider: 'none',
+    model: 'deterministic-only',
+    timeoutMs: 25000,
+    maxRetries: 1,
     confidenceThreshold: 0.85,
     confidenceTiers: {
       high: 0.9,
@@ -71,17 +77,34 @@ const DEFAULT_CONFIG: ReportGenConfig = {
 
 export function loadConfig(workspaceRoot = process.cwd()): ReportGenConfig {
   const configPath = path.join(workspaceRoot, 'reportgen.config.yaml');
-  if (!fs.existsSync(configPath)) {
-    return DEFAULT_CONFIG;
-  }
-  const raw = fs.readFileSync(configPath, 'utf-8');
-  const parsed = (yaml.load(raw) ?? {}) as Partial<ReportGenConfig>;
+  const parsed = fs.existsSync(configPath)
+    ? ((yaml.load(fs.readFileSync(configPath, 'utf-8')) ?? {}) as Partial<ReportGenConfig>)
+    : {};
+
+  const envProvider = process.env.LLM_PROVIDER?.trim();
+  const envModel = process.env.LLM_MODEL?.trim();
+  const envBaseUrl = process.env.LLM_BASE_URL?.trim();
+  const envEnabled =
+    process.env.LLM_ENABLED !== undefined
+      ? process.env.LLM_ENABLED.toLowerCase() !== 'false'
+      : undefined;
+  const envTimeout = process.env.LLM_TIMEOUT_MS ? Number(process.env.LLM_TIMEOUT_MS) : undefined;
+  const envRetries = process.env.LLM_MAX_RETRIES ? Number(process.env.LLM_MAX_RETRIES) : undefined;
+  const envTemp = process.env.LLM_TEMPERATURE ? Number(process.env.LLM_TEMPERATURE) : undefined;
+
   return {
     project: { ...DEFAULT_CONFIG.project, ...parsed.project },
     pdf: { ...DEFAULT_CONFIG.pdf, ...parsed.pdf },
     ai: {
       ...DEFAULT_CONFIG.ai,
       ...parsed.ai,
+      ...(envProvider ? { provider: envProvider } : {}),
+      ...(envModel ? { model: envModel } : {}),
+      ...(envBaseUrl ? { baseUrl: envBaseUrl } : {}),
+      ...(envEnabled !== undefined ? { enabled: envEnabled } : {}),
+      ...(envTimeout && !Number.isNaN(envTimeout) ? { timeoutMs: envTimeout } : {}),
+      ...(envRetries !== undefined && !Number.isNaN(envRetries) ? { maxRetries: envRetries } : {}),
+      ...(envTemp !== undefined && !Number.isNaN(envTemp) ? { temperature: envTemp } : {}),
       confidenceTiers: {
         ...DEFAULT_CONFIG.ai.confidenceTiers,
         ...parsed.ai?.confidenceTiers,

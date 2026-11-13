@@ -9,8 +9,13 @@ pdf:
 
 ai:
   enabled: true
-  provider: gemini
-  model: gemini-3.8-flash
+  # Default 'none': VS Code / host AI Agent owns model selection & auth; ReportGen runs deterministically.
+  # Optional explicit opt-in providers: gemini | openai | openai-compatible | claude | none
+  # Overridable via environment variables: LLM_PROVIDER, LLM_MODEL, LLM_BASE_URL
+  provider: none
+  model: deterministic-only
+  timeoutMs: 25000
+  maxRetries: 1
   confidenceThreshold: 0.85
   confidenceTiers:
     high: 0.90

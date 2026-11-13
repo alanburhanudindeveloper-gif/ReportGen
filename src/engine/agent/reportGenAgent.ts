@@ -1,8 +1,7 @@
 import crypto from 'crypto';
 import {
   buildAiContextSlices,
-  DeterministicFallbackAiProvider,
-  GeminiAiProvider,
+  createSemanticAiProvider,
   IAiProvider,
   validateAiDecisions,
 } from '../ai/aiProvider.ts';
@@ -83,9 +82,7 @@ export class ReportGenAgent {
 
     if (totalAmbiguous > 0) {
       const context = buildAiContextSlices(layoutModel, this.services.skillManager, existingPattern);
-      const provider: IAiProvider = aiEnabled
-        ? new GeminiAiProvider(this.logger, config.ai.model)
-        : new DeterministicFallbackAiProvider(this.logger);
+      const provider: IAiProvider = createSemanticAiProvider(this.logger, config, aiEnabled);
 
       aiResult = await provider.decideSemantics(context);
       validateAiDecisions(layoutModel, aiResult);

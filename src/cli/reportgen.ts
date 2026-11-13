@@ -4,15 +4,19 @@ import path from 'path';
 import { ReportGenAgent } from '../engine/agent/reportGenAgent.ts';
 import { loadConfig } from '../engine/core/config.ts';
 import { LogicTestCase, ReportGenError } from '../engine/core/types.ts';
-import { createReportGenServices } from '../engine/mcp/mcpTools.ts';
+import { wrapUntrustedData } from '../engine/core/untrustedContent.ts';
+import { createReportGenServices, MCP_TOOL_CATALOG } from '../engine/mcp/mcpTools.ts';
 import { RdlcValidator } from '../engine/rdlc/rdlcValidator.ts';
 
 function printHelp(): void {
-  console.log(`ReportGen CLI — AI-assisted PDF -> RDLC Tablix + VB.NET Report Generator
+  console.log(`ReportGen CLI — Deterministic-First PDF -> RDLC Tablix + VB.NET Report Engine
 
 Usage:
-  reportgen analyze <input.pdf> [--out <layout.json>]
-  reportgen generate <input.pdf> [--project <dir>] [--output <relDir>] [--existing-rdlc <file>] [--existing-vb <file>] [--excel <file>] [--no-ai] [--force]
+  reportgen tools [--category <READ_ONLY|VALIDATION|PROPOSAL|MUTATION>]
+  reportgen analyze <input.pdf> [--out <layout.json>] [--stdout]
+  reportgen inspect [--rdlc <file.rdlc>] [--vb <file.vb>] [--excel <file.xlsx>]
+  reportgen generate <input.pdf> [--project <dir>] [--output <relDir>] [--existing-rdlc <file>] [--existing-vb <file>] [--excel <file>] [--no-ai] [--dry-run] [--force]
+  reportgen preview <outputDir>
   reportgen validate <outputDirOrRdlcFile>
   reportgen test <outputDir> [--excel <file>] [--json <file>]
   reportgen render <report.rdlc>
@@ -36,7 +40,93 @@ async function main(): Promise<void> {
 
   const command = args[0];
   const config = loadConfig();
-  const services = createReportGenServices(config, true);
+  const isJsonCmd =
+    ['tools', 'inspect', 'preview', 'validate', 'test', 'render', 'compare'].includes(command) ||
+    args.includes('--stdout') ||
+    args.includes('--dry-run');
+  const services = createReportGenServices(config, !isJsonCmd);
+
+  if (command === 'tools') {
+    const categoryFilter = getFlagValue(args, '--category')?.toUpperCase();
+    const list = categoryFilter
+      ? MCP_TOOL_CATALOG.filter((t) => t.category === categoryFilter)
+      : MCP_TOOL_CATALOG;
+    console.log(JSON.stringify({ tools: list }, null, 2));
+    return;
+  }
+
+  if (command === 'inspect') {
+    const rdlcPath = getFlagValue(args, '--rdlc');
+    const vbPath = getFlagValue(args, '--vb');
+    const excelPath = getFlagValue(args, '--excel');
+    if (!rdlcPath && !vbPath && !excelPath) {
+      throw new Error('inspect requires at least one of --rdlc, --vb, or --excel');
+    }
+
+    const rdlcXml = rdlcPath ? fs.readFileSync(rdlcPath, 'utf-8') : undefined;
+    const vbSource = vbPath ? fs.readFileSync(vbPath, 'utf-8') : undefined;
+    const pattern =
+      rdlcXml || vbSource
+        ? services.projectInspector.inspect({
+            rdlcXml,
+            rdlcFileName: rdlcPath ? path.basename(rdlcPath) : undefined,
+            vbSource,
+            vbFileName: vbPath ? path.basename(vbPath) : undefined,
+          })
+        : undefined;
+    const excelOracle = excelPath
+      ? services.excelOracle.readBuffer(fs.readFileSync(excelPath))
+      : undefined;
+
+    console.log(
+      JSON.stringify(
+        wrapUntrustedData(
+          'mixed_project',
+          [rdlcPath, vbPath, excelPath].filter(Boolean).join(', '),
+          {
+            pattern,
+            excelOracle,
+          }
+        ),
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  if (command === 'preview') {
+    const dir = args[1];
+    if (!dir || !fs.existsSync(dir)) {
+      throw new Error(`Output directory not found: ${dir ?? '(missing)'}`);
+    }
+    const files = fs.readdirSync(dir).sort();
+    const defPath = path.join(dir, 'report-definition.json');
+    const rdlcName = files.find((f) => f.endsWith('.rdlc'));
+    const vbName = files.find((f) => f.endsWith('.vb'));
+    const definition = fs.existsSync(defPath)
+      ? JSON.parse(fs.readFileSync(defPath, 'utf-8'))
+      : undefined;
+    const validation = rdlcName
+      ? new RdlcValidator(services.logger).validate(fs.readFileSync(path.join(dir, rdlcName), 'utf-8'))
+      : undefined;
+    console.log(
+      JSON.stringify(
+        wrapUntrustedData('mixed_project', dir, {
+          directory: path.resolve(dir),
+          files,
+          reportName: definition?.reportName,
+          tablixCount: definition?.tablixRegions?.length,
+          rdlcFile: rdlcName,
+          vbFile: vbName,
+          validation,
+        }),
+        null,
+        2
+      )
+    );
+    return;
+  }
 
   if (command === 'analyze') {
     const pdfPath = args[1];
@@ -47,14 +137,19 @@ async function main(): Promise<void> {
     const docName = path.basename(pdfPath, path.extname(pdfPath));
     const rawLayout = await services.pdfAnalyzer.analyzeBuffer(pdfBytes, docName, config.pdf.dpi);
     const layout = services.gridReconstructor.reconstruct(rawLayout, config.pdf.coordinateTolerance);
-    const outPath = getFlagValue(args, '--out') ?? path.join('output', `${docName}-layout.json`);
-    fs.mkdirSync(path.dirname(outPath), { recursive: true });
     // Omit heavy base64 previews in CLI JSON output
     const compact = {
       ...layout,
       pages: layout.pages.map((p) => ({ ...p, rasterPreviewBase64: undefined })),
     };
-    fs.writeFileSync(outPath, JSON.stringify(compact, null, 2), 'utf-8');
+    const envelope = wrapUntrustedData('pdf', path.basename(pdfPath), compact);
+    if (args.includes('--stdout')) {
+      console.log(JSON.stringify(envelope, null, 2));
+      return;
+    }
+    const outPath = getFlagValue(args, '--out') ?? path.join('output', `${docName}-layout.json`);
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, JSON.stringify(envelope, null, 2), 'utf-8');
     console.log(`Intermediate layout written to ${outPath}`);
     return;
   }
@@ -71,6 +166,7 @@ async function main(): Promise<void> {
     const existingVbPath = getFlagValue(args, '--existing-vb');
     const excelPath = getFlagValue(args, '--excel');
     const force = args.includes('--force');
+    const dryRun = args.includes('--dry-run');
     const useAi = !args.includes('--no-ai');
 
     const agent = new ReportGenAgent(services);
@@ -84,6 +180,36 @@ async function main(): Promise<void> {
       excelBytes: excelPath ? fs.readFileSync(excelPath) : undefined,
       useAi,
     });
+
+    if (dryRun) {
+      console.log(
+        JSON.stringify(
+          {
+            dryRun: true,
+            documentName: result.documentName,
+            reportName: result.reportDefinition.reportName,
+            finalized: result.finalized,
+            rdlcValidation: result.rdlcValidation,
+            logicTests: {
+              status: result.logicTests.status,
+              passed: result.logicTests.passed,
+              total: result.logicTests.total,
+            },
+            wouldWriteRelativeDir: relOutput,
+            wouldWriteFiles: [
+              `${result.reportDefinition.reportName}.rdlc`,
+              `${result.reportDefinition.reportName}.vb`,
+              'dummy.json',
+              'report-definition.json',
+            ],
+          },
+          null,
+          2
+        )
+      );
+      if (!result.finalized) process.exit(1);
+      return;
+    }
 
     if (!result.finalized) {
       throw new Error('Generation blocked: RDLC validation or Logic tests failed.');

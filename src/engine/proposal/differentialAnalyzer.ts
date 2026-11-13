@@ -1,10 +1,14 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { LLMGateway } from '../ai/llmGateway.ts';
+import {
+  buildDiffRefinementPrompt,
+  DiffRefinementDecision,
+  validateDiffRefinementResponse,
+} from '../ai/prompts.ts';
 import { ReportGenConfig } from '../core/config.ts';
 import { StructuredLogger } from '../core/types.ts';
 import { SkillManager } from '../skills/skillManager.ts';
 import {
   BenchmarkAnalysis,
-  ChangeAction,
   ConfidenceTier,
   ModificationChange,
   ReferenceDataExtract,
@@ -25,11 +29,18 @@ export class DifferentialAnalyzer {
   private readonly logger: StructuredLogger;
   private readonly skillManager: SkillManager;
   private readonly config: ReportGenConfig;
+  private readonly gateway: LLMGateway;
 
-  constructor(logger: StructuredLogger, skillManager: SkillManager, config: ReportGenConfig) {
+  constructor(
+    logger: StructuredLogger,
+    skillManager: SkillManager,
+    config: ReportGenConfig,
+    gateway?: LLMGateway
+  ) {
     this.logger = logger;
     this.skillManager = skillManager;
     this.config = config;
+    this.gateway = gateway ?? new LLMGateway({ logger, config });
   }
 
   public async analyze(input: {
@@ -49,8 +60,7 @@ export class DifferentialAnalyzer {
 
     const deterministic = this.buildDeterministicDiff(input);
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    const useAi = input.useAi !== false && this.config.ai.enabled && Boolean(apiKey);
+    const useAi = input.useAi !== false && this.config.ai.enabled && this.gateway.isAvailable();
     if (!useAi || deterministic.length === 0) {
       this.logger.info('DifferentialAnalyzer', 'Completed deterministic differential analysis', {
         changes: deterministic.length,
@@ -63,85 +73,46 @@ export class DifferentialAnalyzer {
       };
     }
 
+    const ambiguousChanges = deterministic.filter((c) => c.tier !== 'HIGH');
+    if (ambiguousChanges.length === 0) {
+      return {
+        changes: deterministic,
+        usedSkills: skills.map((s) => s.name),
+        aiProvider: 'deterministic-high-confidence',
+      };
+    }
+
     try {
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: {
-          headers: { 'User-Agent': 'aistudio-build' },
-        },
-      });
-
-      const ambiguousChanges = deterministic.filter((c) => c.tier !== 'HIGH');
-      if (ambiguousChanges.length === 0) {
-        return {
-          changes: deterministic,
-          usedSkills: skills.map((s) => s.name),
-          aiProvider: 'deterministic-high-confidence',
-        };
-      }
-
       const skillRules = skills
         .map((s) => `${s.name}: ${s.rules.slice(0, 3).join(' | ')}`)
         .join('\n');
 
-      const response = await ai.models.generateContent({
-        model: this.config.ai.model,
-        contents: `Refine semantic decisions for ambiguous proposal modifications.\nSkills:\n${skillRules}\n\nData:\n${JSON.stringify({
-          productCode: input.productCode,
-          benchmark: input.benchmark.productCode,
-          benchmarkElements: input.benchmark.elements.map((e) => e.symbolName),
-          ambiguousChanges: ambiguousChanges.map((c) => ({
-            changeId: c.changeId,
-            decision: c.decision,
-            targetElement: c.targetElement,
-            benchmarkElement: c.benchmarkElement,
-            reason: c.reason,
-          })),
-          referenceFields: (input.referenceExtract?.fields ?? []).slice(0, 15).map((f) => ({
-            field: f.field,
-            value: f.value,
-            isStatusField: f.isStatusField,
-          })),
-        })}`,
-        config: {
-          systemInstruction:
-            'You classify proposal report diffs between a benchmark VB/RDLC template and a new PDF template. Never invent coordinates or RDLC XML. Return valid JSON only.',
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              refinements: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    changeId: { type: Type.STRING },
-                    decision: { type: Type.STRING },
-                    benchmarkElement: { type: Type.STRING },
-                    confidence: { type: Type.NUMBER },
-                    reason: { type: Type.STRING },
-                  },
-                  required: ['changeId', 'decision', 'confidence', 'reason'],
-                },
-              },
-            },
-            required: ['refinements'],
-          },
-        },
+      const request = buildDiffRefinementPrompt({
+        productCode: input.productCode,
+        benchmarkProductCode: input.benchmark.productCode,
+        benchmarkElements: input.benchmark.elements.map((e) => e.symbolName),
+        ambiguousChanges: ambiguousChanges.map((c) => ({
+          changeId: c.changeId,
+          decision: c.decision,
+          targetElement: c.targetElement,
+          benchmarkElement: c.benchmarkElement,
+          reason: c.reason,
+        })),
+        referenceFields: (input.referenceExtract?.fields ?? []).slice(0, 15).map((f) => ({
+          field: f.field,
+          value: f.value,
+          isStatusField: f.isStatusField,
+        })),
+        skillRules,
       });
 
-      const parsed = JSON.parse((response.text ?? '{}').trim()) as {
-        refinements?: Array<{
-          changeId: string;
-          decision: ChangeAction;
-          benchmarkElement?: string;
-          confidence: number;
-          reason: string;
-        }>;
-      };
+      const allowedIds = new Set(ambiguousChanges.map((c) => c.changeId));
+      const { response, validated } = await this.gateway.execute<DiffRefinementDecision[]>(
+        request,
+        (parsed) => validateDiffRefinementResponse(allowedIds, parsed)
+      );
 
-      const validDecisions: ChangeAction[] = ['REUSE', 'RENAME', 'MODIFY', 'ADD', 'REMOVE'];
-      const map = new Map((parsed.refinements ?? []).map((r) => [r.changeId, r]));
+      const map = new Map(validated.map((r) => [r.changeId, r]));
 
       const merged = deterministic.map((c) => {
         const ref = map.get(c.changeId);
@@ -150,7 +121,7 @@ export class DifferentialAnalyzer {
         const tier = resolveTier(conf, this.config);
         return {
           ...c,
-          decision: validDecisions.includes(ref.decision) ? ref.decision : c.decision,
+          decision: ref.decision,
           benchmarkElement: ref.benchmarkElement ?? c.benchmarkElement,
           confidence: conf,
           tier,
@@ -162,7 +133,7 @@ export class DifferentialAnalyzer {
       return {
         changes: merged,
         usedSkills: skills.map((s) => s.name),
-        aiProvider: `gemini:${this.config.ai.model}`,
+        aiProvider: `${response.provider}:${response.model}`,
       };
     } catch (err) {
       this.logger.warn('DifferentialAnalyzer', 'AI differential refinement fell back to deterministic', {

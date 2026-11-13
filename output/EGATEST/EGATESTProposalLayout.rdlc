@@ -1,0 +1,274 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition" xmlns:rd="http://schemas.microsoft.com/SQLServer/reporting/reportdesigner">
+  <DataSources>
+    <DataSource Name="EGATESTDataSource">
+      <ConnectionProperties>
+        <DataProvider>System.Data.DataSet</DataProvider>
+        <ConnectString>/* Local Connection */</ConnectString>
+      </ConnectionProperties>
+      <rd:DataSourceID>11111111-1111-4111-8111-111111111111</rd:DataSourceID>
+    </DataSource>
+  </DataSources>
+  <DataSets>
+    <DataSet Name="EGATESTProposalDataSet">
+      <Query>
+        <DataSourceName>EGATESTDataSource</DataSourceName>
+        <CommandText>/* Local Query */</CommandText>
+      </Query>
+      <Fields>
+        <Field Name="PolicyHolderName"><DataField>PolicyHolderName</DataField><rd:TypeName>System.String</rd:TypeName></Field>
+        <Field Name="AnnualPremium"><DataField>AnnualPremium</DataField><rd:TypeName>System.Decimal</rd:TypeName></Field>
+        <Field Name="SumAssured"><DataField>SumAssured</DataField><rd:TypeName>System.Decimal</rd:TypeName></Field>
+        <Field Name="RiderStatus"><DataField>RiderStatus</DataField><rd:TypeName>System.String</rd:TypeName></Field>
+              <Field Name="ExecutiveRiderStatus"><DataField>ExecutiveRiderStatus</DataField><rd:TypeName>System.String</rd:TypeName></Field>
+        <Field Name="WaiverOfPremium"><DataField>WaiverOfPremium</DataField><rd:TypeName>System.String</rd:TypeName></Field>
+        <Field Name="EffectiveDate"><DataField>EffectiveDate</DataField><rd:TypeName>System.DateTime</rd:TypeName></Field>
+        <Field Name="ProjectedCashValue"><DataField>ProjectedCashValue</DataField><rd:TypeName>System.Decimal</rd:TypeName></Field>
+        <Field Name="ProductCode"><DataField>ProductCode</DataField><rd:TypeName>System.String</rd:TypeName></Field>
+        <Field Name="PlanCode"><DataField>PlanCode</DataField><rd:TypeName>System.String</rd:TypeName></Field>
+      </Fields>
+    </DataSet>
+  </DataSets>
+  <Body>
+    <ReportItems>
+      <Tablix Name="Tablix_EGATESTSummary">
+        <TablixBody>
+          <TablixColumns>
+            <TablixColumn><Width>3.5in</Width></TablixColumn>
+            <TablixColumn><Width>3.5in</Width></TablixColumn>
+          </TablixColumns>
+          <TablixRows>
+            <TablixRow>
+              <Height>0.35in</Height>
+              <TablixCells>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="txtPolicyHolder">
+                      <CanGrow>true</CanGrow>
+                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>=Fields!PolicyHolderName.Value</Value><Style /></TextRun></TextRuns><Style /></Paragraph></Paragraphs>
+                      <Style />
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="txtRiderStatus">
+                      <CanGrow>true</CanGrow>
+                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>=IIf(Fields!RiderStatus.Value = "Included", "Included", "Optional")</Value><Style /></TextRun></TextRuns><Style /></Paragraph></Paragraphs>
+                      <Style />
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+              </TablixCells>
+            </TablixRow>
+          </TablixRows>
+        </TablixBody>
+        <TablixColumnHierarchy><TablixMembers><TablixMember /><TablixMember /></TablixMembers></TablixColumnHierarchy>
+        <TablixRowHierarchy><TablixMembers><TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember></TablixMembers></TablixRowHierarchy>
+        <DataSetName>EGATESTProposalDataSet</DataSetName>
+        <Top>0.5in</Top>
+        <Left>0.5in</Left>
+        <Height>0.35in</Height>
+        <Width>7.0in</Width>
+      </Tablix>
+          <Tablix Name="Tablix_CHG_0002">
+        <TablixBody>
+          <TablixColumns>
+            <TablixColumn><Width>6.8in</Width></TablixColumn>
+          </TablixColumns>
+          <TablixRows>
+            <TablixRow>
+              <Height>0.32in</Height>
+              <TablixCells>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="txtSection_CHG_0002">
+                      <CanGrow>true</CanGrow>
+                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>Executive Rider Status: &lt;ExecutiveRiderStatus&gt;</Value><Style><FontWeight>Bold</FontWeight></Style></TextRun></TextRuns><Style /></Paragraph></Paragraphs>
+                      <Style />
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+              </TablixCells>
+            </TablixRow>
+          </TablixRows>
+        </TablixBody>
+        <TablixColumnHierarchy><TablixMembers><TablixMember /></TablixMembers></TablixColumnHierarchy>
+        <TablixRowHierarchy><TablixMembers><TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember></TablixMembers></TablixRowHierarchy>
+        <DataSetName>EGATESTProposalDataSet</DataSetName>
+        <Top>2.60in</Top>
+        <Left>0.4in</Left>
+        <Height>0.32in</Height>
+        <Width>6.8in</Width>
+      </Tablix>
+      <Tablix Name="Tablix_CHG_0005">
+        <TablixBody>
+          <TablixColumns>
+            <TablixColumn><Width>6.8in</Width></TablixColumn>
+          </TablixColumns>
+          <TablixRows>
+            <TablixRow>
+              <Height>0.32in</Height>
+              <TablixCells>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="txtSection_CHG_0005">
+                      <CanGrow>true</CanGrow>
+                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>Coverage Tier</Value><Style><FontWeight>Bold</FontWeight></Style></TextRun></TextRuns><Style /></Paragraph></Paragraphs>
+                      <Style />
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+              </TablixCells>
+            </TablixRow>
+          </TablixRows>
+        </TablixBody>
+        <TablixColumnHierarchy><TablixMembers><TablixMember /></TablixMembers></TablixColumnHierarchy>
+        <TablixRowHierarchy><TablixMembers><TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember></TablixMembers></TablixRowHierarchy>
+        <DataSetName>EGATESTProposalDataSet</DataSetName>
+        <Top>3.35in</Top>
+        <Left>0.4in</Left>
+        <Height>0.32in</Height>
+        <Width>6.8in</Width>
+      </Tablix>
+      <Tablix Name="Tablix_CHG_0006">
+        <TablixBody>
+          <TablixColumns>
+            <TablixColumn><Width>6.8in</Width></TablixColumn>
+          </TablixColumns>
+          <TablixRows>
+            <TablixRow>
+              <Height>0.32in</Height>
+              <TablixCells>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="txtSection_CHG_0006">
+                      <CanGrow>true</CanGrow>
+                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>Global Evacuation Rider</Value><Style><FontWeight>Bold</FontWeight></Style></TextRun></TextRuns><Style /></Paragraph></Paragraphs>
+                      <Style />
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+              </TablixCells>
+            </TablixRow>
+          </TablixRows>
+        </TablixBody>
+        <TablixColumnHierarchy><TablixMembers><TablixMember /></TablixMembers></TablixColumnHierarchy>
+        <TablixRowHierarchy><TablixMembers><TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember></TablixMembers></TablixRowHierarchy>
+        <DataSetName>EGATESTProposalDataSet</DataSetName>
+        <Top>4.10in</Top>
+        <Left>0.4in</Left>
+        <Height>0.32in</Height>
+        <Width>6.8in</Width>
+      </Tablix>
+      <Tablix Name="Tablix_CHG_0007">
+        <TablixBody>
+          <TablixColumns>
+            <TablixColumn><Width>6.8in</Width></TablixColumn>
+          </TablixColumns>
+          <TablixRows>
+            <TablixRow>
+              <Height>0.32in</Height>
+              <TablixCells>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="txtSection_CHG_0007">
+                      <CanGrow>true</CanGrow>
+                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>&lt;EvacRiderFee&gt;</Value><Style><FontWeight>Bold</FontWeight></Style></TextRun></TextRuns><Style /></Paragraph></Paragraphs>
+                      <Style />
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+              </TablixCells>
+            </TablixRow>
+          </TablixRows>
+        </TablixBody>
+        <TablixColumnHierarchy><TablixMembers><TablixMember /></TablixMembers></TablixColumnHierarchy>
+        <TablixRowHierarchy><TablixMembers><TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember></TablixMembers></TablixRowHierarchy>
+        <DataSetName>EGATESTProposalDataSet</DataSetName>
+        <Top>4.85in</Top>
+        <Left>0.4in</Left>
+        <Height>0.32in</Height>
+        <Width>6.8in</Width>
+      </Tablix>
+      <Tablix Name="Tablix_CHG_0009">
+        <TablixBody>
+          <TablixColumns>
+            <TablixColumn><Width>6.8in</Width></TablixColumn>
+          </TablixColumns>
+          <TablixRows>
+            <TablixRow>
+              <Height>0.32in</Height>
+              <TablixCells>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="txtSection_CHG_0009">
+                      <CanGrow>true</CanGrow>
+                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>EGA Proposal Illustration — Confidential Template Page 1 of 2</Value><Style><FontWeight>Bold</FontWeight></Style></TextRun></TextRuns><Style /></Paragraph></Paragraphs>
+                      <Style />
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+              </TablixCells>
+            </TablixRow>
+          </TablixRows>
+        </TablixBody>
+        <TablixColumnHierarchy><TablixMembers><TablixMember /></TablixMembers></TablixColumnHierarchy>
+        <TablixRowHierarchy><TablixMembers><TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember></TablixMembers></TablixRowHierarchy>
+        <DataSetName>EGATESTProposalDataSet</DataSetName>
+        <Top>5.60in</Top>
+        <Left>0.4in</Left>
+        <Height>0.32in</Height>
+        <Width>6.8in</Width>
+      </Tablix>
+      <Tablix Name="Tablix_CHG_0010">
+        <TablixBody>
+          <TablixColumns>
+            <TablixColumn><Width>6.8in</Width></TablixColumn>
+          </TablixColumns>
+          <TablixRows>
+            <TablixRow>
+              <Height>0.32in</Height>
+              <TablixCells>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="txtSection_CHG_0010">
+                      <CanGrow>true</CanGrow>
+                      <Paragraphs><Paragraph><TextRuns><TextRun><Value>EGA Proposal Illustration — Confidential Template Page 2 of 2</Value><Style><FontWeight>Bold</FontWeight></Style></TextRun></TextRuns><Style /></Paragraph></Paragraphs>
+                      <Style />
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+              </TablixCells>
+            </TablixRow>
+          </TablixRows>
+        </TablixBody>
+        <TablixColumnHierarchy><TablixMembers><TablixMember /></TablixMembers></TablixColumnHierarchy>
+        <TablixRowHierarchy><TablixMembers><TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember></TablixMembers></TablixRowHierarchy>
+        <DataSetName>EGATESTProposalDataSet</DataSetName>
+        <PageBreak><BreakLocation>Start</BreakLocation></PageBreak>
+        <Top>6.35in</Top>
+        <Left>0.4in</Left>
+        <Height>0.32in</Height>
+        <Width>6.8in</Width>
+      </Tablix>
+    </ReportItems>
+    <Height>7.60in</Height>
+    <Style />
+  </Body>
+  <Width>7.7in</Width>
+  <Page>
+    <PageHeight>11in</PageHeight>
+    <PageWidth>8.5in</PageWidth>
+    <LeftMargin>0.4in</LeftMargin>
+    <RightMargin>0.4in</RightMargin>
+    <TopMargin>0.4in</TopMargin>
+    <BottomMargin>0.4in</BottomMargin>
+    <Style />
+  </Page>
+  <ReportParameters>
+    <ReportParameter Name="ProductCode"><DataType>String</DataType><Nullable>true</Nullable><AllowBlank>true</AllowBlank><Prompt>ProductCode</Prompt></ReportParameter>
+    <ReportParameter Name="PlanCode"><DataType>String</DataType><Nullable>true</Nullable><AllowBlank>true</AllowBlank><Prompt>PlanCode</Prompt></ReportParameter>
+  </ReportParameters>
+  <rd:ReportUnitType>Inch</rd:ReportUnitType>
+</Report>

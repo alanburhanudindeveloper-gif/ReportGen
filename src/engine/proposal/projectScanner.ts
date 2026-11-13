@@ -1,7 +1,13 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { GoogleGenAI, Type } from '@google/genai';
+import { LLMGateway } from '../ai/llmGateway.ts';
+import {
+  BenchmarkRankingItem,
+  buildBenchmarkRankingPrompt,
+  validateBenchmarkRankingResponse,
+} from '../ai/prompts.ts';
+import { ReportGenConfig } from '../core/config.ts';
 import { StructuredLogger } from '../core/types.ts';
 import { ProjectStructureParser } from './projectStructureParser.ts';
 import { ReportGenProjectScanner } from './reportGenProjectScanner.ts';
@@ -101,10 +107,12 @@ export class DeterministicBenchmarkDiscovery implements IBenchmarkDiscovery {
 
 export class HybridBenchmarkDiscovery implements IBenchmarkDiscovery {
   private readonly logger: StructuredLogger;
+  private readonly gateway: LLMGateway;
   private readonly fallback = new DeterministicBenchmarkDiscovery();
 
-  constructor(logger: StructuredLogger) {
+  constructor(logger: StructuredLogger, config?: ReportGenConfig, gateway?: LLMGateway) {
     this.logger = logger;
+    this.gateway = gateway ?? new LLMGateway({ logger, config });
   }
 
   public async rankCandidates(
@@ -112,65 +120,33 @@ export class HybridBenchmarkDiscovery implements IBenchmarkDiscovery {
     pdfA: TemplateAnalysis
   ): Promise<BenchmarkCandidate[]> {
     const deterministic = await this.fallback.rankCandidates(products, pdfA);
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || products.length <= 1) {
+    if (!this.gateway.isAvailable() || products.length <= 1) {
       return deterministic;
     }
 
     try {
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: {
-          headers: { 'User-Agent': 'aistudio-build' },
-        },
-      });
       const sampleHeadings = pdfA.layoutModel.pages
         .flatMap((p) => p.regions.filter((r) => r.style.bold && r.text).map((r) => r.text!))
         .slice(0, 15);
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: JSON.stringify({
-          pdfHeadings: sampleHeadings,
-          pdfPageCount: pdfA.pageCount,
-          candidates: products.map((p) => ({
-            productCode: p.productCode,
-            elementSymbols: p.elementSymbols,
-            datasets: p.datasets,
-            parameters: p.parameters,
-            rdlcCount: p.layoutPaths?.length ?? (p.layoutPath ? 1 : 0),
-          })),
-        }),
-        config: {
-          systemInstruction:
-            'Rank benchmark proposal products by structural suitability for reproducing the new PDF template. Return JSON only.',
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              rankings: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    productCode: { type: Type.STRING },
-                    semanticScore: { type: Type.NUMBER },
-                    reason: { type: Type.STRING },
-                  },
-                  required: ['productCode', 'semanticScore', 'reason'],
-                },
-              },
-            },
-            required: ['rankings'],
-          },
-        },
+      const request = buildBenchmarkRankingPrompt({
+        pdfHeadings: sampleHeadings,
+        pdfPageCount: pdfA.pageCount,
+        candidates: products.map((p) => ({
+          productCode: p.productCode,
+          elementSymbols: p.elementSymbols,
+          datasets: p.datasets,
+          parameters: p.parameters,
+          rdlcCount: p.layoutPaths?.length ?? (p.layoutPath ? 1 : 0),
+        })),
       });
 
-      const parsed = JSON.parse((response.text ?? '{}').trim()) as {
-        rankings?: Array<{ productCode: string; semanticScore: number; reason: string }>;
-      };
+      const { validated } = await this.gateway.execute<BenchmarkRankingItem[]>(
+        request,
+        (parsed) => validateBenchmarkRankingResponse(parsed)
+      );
 
-      const map = new Map((parsed.rankings ?? []).map((r) => [r.productCode.toUpperCase(), r]));
+      const map = new Map(validated.map((r) => [r.productCode.toUpperCase(), r]));
       return deterministic
         .map((d) => {
           const sem = map.get(d.productCode.toUpperCase());
@@ -187,7 +163,7 @@ export class HybridBenchmarkDiscovery implements IBenchmarkDiscovery {
         })
         .sort((a, b) => b.score - a.score);
     } catch (err) {
-      this.logger.warn('BenchmarkDiscovery', 'Gemini semantic ranking fell back to deterministic', {
+      this.logger.warn('BenchmarkDiscovery', 'LLM semantic ranking fell back to deterministic', {
         error: err instanceof Error ? err.message : String(err),
       });
       return deterministic;

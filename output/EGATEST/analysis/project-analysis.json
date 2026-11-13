@@ -1,0 +1,361 @@
+{
+  "projectRoot": "/app/applet/samples/SampleProposalProject",
+  "projectFilePath": "/app/applet/samples/SampleProposalProject/Proposal.vbproj",
+  "scannedAt": "2026-11-13T16:03:29.512Z",
+  "totalFilesScanned": 7,
+  "technologyProfile": {
+    "language": "VB.NET",
+    "languageVersion": "Visual Basic (OptionStrict On)",
+    "projectType": "Class Library / Report Module",
+    "targetFramework": "net8.0-windows",
+    "projectFormat": "SDK-style .vbproj",
+    "buildTool": "dotnet / MSBuild (unavailable in current Linux environment)",
+    "compiler": "vbc / Roslyn VB.NET (unavailable in current Linux environment)",
+    "rdlcVersion": "2008",
+    "reportRuntime": "ReportViewerCore.NETCore@15.1.22 (host runner in dotnet/vb-runner)",
+    "optionStrict": "On",
+    "rootNamespace": "Insurance.Proposal.Reports",
+    "references": [
+      "Proposal\\MFA\\MFAProposalBuilder.vb",
+      "Proposal\\MFA\\MFAProposalElement.vb",
+      "Proposal\\MFA\\MFABenefitElement.vb",
+      "Proposal\\ABC\\ABCProposalBuilder.vb",
+      "Proposal\\MFA\\MFAProposalLayout.rdlc",
+      "Proposal\\MFA\\MFABenefit.rdlc"
+    ],
+    "packages": [],
+    "compilerAvailableInEnvironment": false,
+    "reportRuntimeAvailableInEnvironment": false,
+    "detectedAt": "2026-11-13T16:03:29.503Z"
+  },
+  "parsedProjects": [
+    {
+      "projectFilePath": "/app/applet/samples/SampleProposalProject/Proposal.vbproj",
+      "projectFileName": "Proposal.vbproj",
+      "projectDirectory": "/app/applet/samples/SampleProposalProject",
+      "projectKind": "vbproj",
+      "isSdkStyle": true,
+      "enableDefaultItems": true,
+      "targetFramework": "net8.0-windows",
+      "rootNamespace": "Insurance.Proposal.Reports",
+      "optionStrict": "On",
+      "compileItems": [
+        {
+          "relativePath": "Proposal/ABC/ABCProposalBuilder.vb",
+          "absolutePath": "/app/applet/samples/SampleProposalProject/Proposal/ABC/ABCProposalBuilder.vb",
+          "itemType": "Compile",
+          "inclusionSource": "explicit_compile",
+          "existsOnDisk": true
+        },
+        {
+          "relativePath": "Proposal/MFA/MFABenefitElement.vb",
+          "absolutePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefitElement.vb",
+          "itemType": "Compile",
+          "inclusionSource": "explicit_compile",
+          "existsOnDisk": true
+        },
+        {
+          "relativePath": "Proposal/MFA/MFAProposalBuilder.vb",
+          "absolutePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalBuilder.vb",
+          "itemType": "Compile",
+          "inclusionSource": "explicit_compile",
+          "existsOnDisk": true
+        },
+        {
+          "relativePath": "Proposal/MFA/MFAProposalElement.vb",
+          "absolutePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalElement.vb",
+          "itemType": "Compile",
+          "inclusionSource": "explicit_compile",
+          "existsOnDisk": true
+        }
+      ],
+      "embeddedResources": [
+        {
+          "relativePath": "Proposal/MFA/MFABenefit.rdlc",
+          "absolutePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefit.rdlc",
+          "itemType": "EmbeddedResource",
+          "inclusionSource": "explicit_embedded_resource",
+          "existsOnDisk": true
+        },
+        {
+          "relativePath": "Proposal/MFA/MFAProposalLayout.rdlc",
+          "absolutePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalLayout.rdlc",
+          "itemType": "EmbeddedResource",
+          "inclusionSource": "explicit_embedded_resource",
+          "existsOnDisk": true
+        }
+      ],
+      "rdlcResources": [
+        {
+          "relativePath": "Proposal/MFA/MFABenefit.rdlc",
+          "absolutePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefit.rdlc",
+          "itemType": "EmbeddedResource",
+          "inclusionSource": "explicit_embedded_resource",
+          "existsOnDisk": true
+        },
+        {
+          "relativePath": "Proposal/MFA/MFAProposalLayout.rdlc",
+          "absolutePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalLayout.rdlc",
+          "itemType": "EmbeddedResource",
+          "inclusionSource": "explicit_embedded_resource",
+          "existsOnDisk": true
+        }
+      ],
+      "projectReferences": [],
+      "excludedPatterns": []
+    }
+  ],
+  "deterministicCatalog": {
+    "service": "ReportGen.Project.Scanner",
+    "projectRoot": "/app/applet/samples/SampleProposalProject",
+    "projectFiles": [
+      "Proposal.vbproj"
+    ],
+    "catalogDigest": "1fb84c9d2433bed5b38a95c4",
+    "entryPointCount": 2,
+    "entries": [
+      {
+        "productCode": "ABC",
+        "planCodes": [
+          "ABC-BASIC"
+        ],
+        "entryPointClass": "ABCProposalBuilder",
+        "entryPointFile": "/app/applet/samples/SampleProposalProject/Proposal/ABC/ABCProposalBuilder.vb",
+        "entryPointRelativePath": "Proposal/ABC/ABCProposalBuilder.vb",
+        "projectFilePath": "/app/applet/samples/SampleProposalProject/Proposal.vbproj",
+        "registeredInProjectFile": true,
+        "elementClasses": [],
+        "elementFiles": [],
+        "rdlcFiles": [],
+        "datasets": [
+          "ABCDataSource",
+          "ABCProposalDataSet"
+        ],
+        "parameters": [],
+        "hasProductEngineDependency": false,
+        "catalogHash": "e1d9410fc64fb768e069"
+      },
+      {
+        "productCode": "MFA",
+        "planCodes": [
+          "MFA-STD"
+        ],
+        "entryPointClass": "MFAProposalBuilder",
+        "entryPointFile": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalBuilder.vb",
+        "entryPointRelativePath": "Proposal/MFA/MFAProposalBuilder.vb",
+        "projectFilePath": "/app/applet/samples/SampleProposalProject/Proposal.vbproj",
+        "registeredInProjectFile": true,
+        "elementClasses": [
+          "MFABenefitElement",
+          "MFAProposalElement"
+        ],
+        "elementFiles": [
+          "Proposal/MFA/MFABenefitElement.vb",
+          "Proposal/MFA/MFAProposalElement.vb"
+        ],
+        "rdlcFiles": [
+          "Proposal/MFA/MFABenefit.rdlc",
+          "Proposal/MFA/MFAProposalLayout.rdlc"
+        ],
+        "datasets": [
+          "MFADataSource",
+          "MFAProposalDataSet"
+        ],
+        "parameters": [
+          "PlanCode",
+          "ProductCode"
+        ],
+        "hasProductEngineDependency": true,
+        "catalogHash": "d468b542145a84429567"
+      }
+    ]
+  },
+  "unregisteredVbFiles": [],
+  "products": [
+    {
+      "productCode": "ABC",
+      "planCodes": [
+        "ABC-BASIC"
+      ],
+      "rootDirectory": "/app/applet/samples/SampleProposalProject/Proposal/ABC",
+      "builderPath": "/app/applet/samples/SampleProposalProject/Proposal/ABC/ABCProposalBuilder.vb",
+      "elementPaths": [],
+      "layoutPaths": [],
+      "relatedFiles": [
+        "/app/applet/samples/SampleProposalProject/Proposal/ABC/ABCProposalBuilder.vb"
+      ],
+      "projectFilePath": "/app/applet/samples/SampleProposalProject/Proposal.vbproj",
+      "datasets": [
+        "ABCDataSource",
+        "ABCProposalDataSet"
+      ],
+      "parameters": [],
+      "elementSymbols": [],
+      "expressions": [],
+      "dependencies": [
+        "System",
+        "System.Collections.Generic",
+        "System.Data"
+      ],
+      "hasProductEngineDependency": false,
+      "discoveryReason": "Project.Scanner (registered in Proposal.vbproj): ABCProposalBuilder.vb -> 0 Element file(s), 0 RDLC file(s), 0 ProductEngine call(s).",
+      "dependencyGraph": {
+        "productCode": "ABC",
+        "builderFile": "/app/applet/samples/SampleProposalProject/Proposal/ABC/ABCProposalBuilder.vb",
+        "builderClass": "ABCProposalBuilder",
+        "elements": [],
+        "rdlcFiles": [],
+        "datasets": [
+          "ABCDataSource",
+          "ABCProposalDataSet"
+        ],
+        "parameters": [],
+        "productEngineCalls": [],
+        "unresolvedReferences": [
+          {
+            "productCode": "ABC",
+            "kind": "Element",
+            "symbolOrName": "ABCProposalElement",
+            "referencedFrom": "ABCProposalBuilder.vb (BuildProposalDataSet)",
+            "reason": "ProposalElement class \"ABCProposalElement\" referenced by BuildProposalDataSet() does not exist in target project."
+          }
+        ]
+      }
+    },
+    {
+      "productCode": "MFA",
+      "planCodes": [
+        "MFA-STD"
+      ],
+      "rootDirectory": "/app/applet/samples/SampleProposalProject/Proposal/MFA",
+      "builderPath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalBuilder.vb",
+      "elementPath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalElement.vb",
+      "elementPaths": [
+        "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefitElement.vb",
+        "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalElement.vb"
+      ],
+      "layoutPath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalLayout.rdlc",
+      "layoutPaths": [
+        "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefit.rdlc",
+        "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalLayout.rdlc"
+      ],
+      "relatedFiles": [
+        "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefit.rdlc",
+        "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefitElement.vb",
+        "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalBuilder.vb",
+        "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalElement.vb",
+        "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalLayout.rdlc"
+      ],
+      "projectFilePath": "/app/applet/samples/SampleProposalProject/Proposal.vbproj",
+      "datasets": [
+        "MFADataSource",
+        "MFAProposalDataSet"
+      ],
+      "parameters": [
+        "PlanCode",
+        "ProductCode"
+      ],
+      "elementSymbols": [
+        "BuildBenefitScheduleElement",
+        "BuildCoverageSummaryElement",
+        "BuildLegacyNotesElement",
+        "GetReportTemplateName"
+      ],
+      "expressions": [
+        "=Fields!AnnualPremium.Value",
+        "=Fields!PolicyHolderName.Value",
+        "=Fields!RiderStatus.Value",
+        "=IIf(Fields!RiderStatus.Value = "
+      ],
+      "dependencies": [
+        "ProductEngine.CalculateAnnualPremium",
+        "ProductEngine.GetBaseSumAssured",
+        "System",
+        "System.Collections.Generic",
+        "System.Data"
+      ],
+      "hasProductEngineDependency": true,
+      "discoveryReason": "Project.Scanner (registered in Proposal.vbproj): MFAProposalBuilder.vb -> 2 Element file(s), 2 RDLC file(s), 2 ProductEngine call(s).",
+      "dependencyGraph": {
+        "productCode": "MFA",
+        "builderFile": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalBuilder.vb",
+        "builderClass": "MFAProposalBuilder",
+        "elements": [
+          {
+            "className": "MFAProposalElement",
+            "filePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalElement.vb",
+            "usedByMethods": [
+              "BuildProposalDataSet"
+            ],
+            "rdlcFiles": [],
+            "methods": [
+              "BuildCoverageSummaryElement",
+              "BuildBenefitScheduleElement",
+              "BuildLegacyNotesElement"
+            ],
+            "productEngineCalls": []
+          },
+          {
+            "className": "MFABenefitElement",
+            "filePath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefitElement.vb",
+            "usedByMethods": [
+              "BuildProposalDataSet"
+            ],
+            "rdlcFiles": [
+              "MFABenefit.rdlc"
+            ],
+            "methods": [
+              "GetReportTemplateName",
+              "BuildBenefitScheduleElement"
+            ],
+            "productEngineCalls": []
+          }
+        ],
+        "rdlcFiles": [
+          {
+            "name": "MFAProposalLayout.rdlc",
+            "resolvedPath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFAProposalLayout.rdlc",
+            "referencedFrom": "MFAProposalBuilder.vb",
+            "classification": "direct",
+            "datasets": [
+              "MFAProposalDataSet"
+            ]
+          },
+          {
+            "name": "MFABenefit.rdlc",
+            "resolvedPath": "/app/applet/samples/SampleProposalProject/Proposal/MFA/MFABenefit.rdlc",
+            "referencedFrom": "MFABenefitElement.vb",
+            "classification": "direct",
+            "datasets": [
+              "MFAProposalDataSet"
+            ]
+          }
+        ],
+        "datasets": [
+          "MFADataSource",
+          "MFAProposalDataSet"
+        ],
+        "parameters": [
+          "PlanCode",
+          "ProductCode"
+        ],
+        "productEngineCalls": [
+          "ProductEngine.CalculateAnnualPremium",
+          "ProductEngine.GetBaseSumAssured"
+        ],
+        "unresolvedReferences": []
+      }
+    }
+  ],
+  "sharedRdlcs": [],
+  "unusedRdlcCandidates": [],
+  "unresolvedReferences": [
+    {
+      "productCode": "ABC",
+      "kind": "Element",
+      "symbolOrName": "ABCProposalElement",
+      "referencedFrom": "ABCProposalBuilder.vb (BuildProposalDataSet)",
+      "reason": "ProposalElement class \"ABCProposalElement\" referenced by BuildProposalDataSet() does not exist in target project."
+    }
+  ]
+}

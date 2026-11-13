@@ -5,6 +5,7 @@ import multer from 'multer';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { ReportGenAgent } from './src/engine/agent/reportGenAgent.ts';
+import { LLMGateway } from './src/engine/ai/llmGateway.ts';
 import { loadConfig, resolveSafeSubpath } from './src/engine/core/config.ts';
 import { ReportGenError, StructuredLogger } from './src/engine/core/types.ts';
 import { createReportGenServices, MCP_TOOL_CATALOG } from './src/engine/mcp/mcpTools.ts';
@@ -36,12 +37,18 @@ async function startServer() {
   app.use(express.json({ limit: '10mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, service: 'ReportGen', geminiConfigured: Boolean(process.env.GEMINI_API_KEY) });
+    const config = loadConfig();
+    const logger = new StructuredLogger(false);
+    const gateway = new LLMGateway({ logger, config });
+    const llm = gateway.getStatus();
+    res.json({ ok: true, service: 'ReportGen', llm });
   });
 
   app.get('/api/config', (_req, res) => {
     const config = loadConfig();
-    res.json(config);
+    const logger = new StructuredLogger(false);
+    const llmStatus = new LLMGateway({ logger, config }).getStatus();
+    res.json({ ...config, llmStatus });
   });
 
   app.get('/api/mcp/tools', (_req, res) => {

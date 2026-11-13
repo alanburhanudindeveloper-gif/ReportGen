@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { ReportGenConfig } from '../core/config.ts';
 import {
   AiAmbiguousRegionSlice,
   AiDecisionItem,
@@ -12,6 +12,13 @@ import {
   StructuredLogger,
 } from '../core/types.ts';
 import { SkillDocument, SkillManager } from '../skills/skillManager.ts';
+import { LLMGateway } from './llmGateway.ts';
+import {
+  buildLayoutDisambiguationPrompt,
+  VALID_BAND_KINDS,
+  VALID_SEMANTIC_ROLES,
+  validateLayoutDisambiguationResponse,
+} from './prompts.ts';
 
 export interface AiReasoningContext {
   documentName: string;
@@ -31,33 +38,8 @@ export interface IAiProvider {
   decideSemantics(context: AiReasoningContext): Promise<AiDecisionResponse>;
 }
 
-const VALID_ROLES: SemanticRole[] = [
-  'reportTitle',
-  'sectionHeading',
-  'fieldLabel',
-  'fieldValue',
-  'tableHeader',
-  'tableCell',
-  'cardContainer',
-  'timelineStep',
-  'numberedListItem',
-  'paragraph',
-  'headerText',
-  'footerText',
-  'logoOrGraphic',
-  'calculationField',
-  'unknown',
-];
-
-const VALID_BANDS: BandKind[] = [
-  'Header',
-  'Information',
-  'Detail',
-  'Cards',
-  'Timeline',
-  'Notes',
-  'Footer',
-];
+const VALID_ROLES: SemanticRole[] = VALID_SEMANTIC_ROLES;
+const VALID_BANDS: BandKind[] = VALID_BAND_KINDS;
 
 export function buildAiContextSlices(
   layout: IntermediateLayoutModel,
@@ -101,7 +83,9 @@ export function buildAiContextSlices(
   const hasFinancialTerms = allRegions.some((r) =>
     /total|subtotal|tax|discount|price|qty|amount|invoice|net|gross/i.test(r.text ?? '')
   );
-  const hasComplexGraphics = allRegions.some((r) => r.type === 'vector_complex' || r.type === 'image');
+  const hasComplexGraphics = allRegions.some(
+    (r) => r.type === 'vector_complex' || r.type === 'image'
+  );
 
   const skills = skillManager.retrieveRelevantSkills({
     taskType: 'layout-disambiguation',
@@ -126,14 +110,18 @@ export function buildAiContextSlices(
   };
 }
 
-export class GeminiAiProvider implements IAiProvider {
-  public readonly name = 'gemini';
+export class GatewayAiProvider implements IAiProvider {
+  public readonly name: string;
   public readonly model: string;
   private readonly logger: StructuredLogger;
+  private readonly gateway: LLMGateway;
 
-  constructor(logger: StructuredLogger, model = 'gemini-3.8-flash') {
+  constructor(logger: StructuredLogger, gateway: LLMGateway) {
     this.logger = logger;
-    this.model = model;
+    this.gateway = gateway;
+    const status = gateway.getStatus();
+    this.name = status.provider;
+    this.model = status.model;
   }
 
   public async decideSemantics(context: AiReasoningContext): Promise<AiDecisionResponse> {
@@ -151,84 +139,34 @@ export class GeminiAiProvider implements IAiProvider {
       };
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      this.logger.warn('AI', 'GEMINI_API_KEY not configured; falling back to deterministic semantic resolver');
+    if (!this.gateway.isAvailable()) {
+      this.logger.warn(
+        'AI',
+        `LLM provider "${this.name}" unavailable or unconfigured; falling back to deterministic semantic resolver`
+      );
       return new DeterministicFallbackAiProvider(this.logger).decideSemantics(context);
     }
 
     this.logger.info('AI', 'AI reasoning requested', {
+      provider: this.name,
+      model: this.model,
       ambiguousCount: context.ambiguousRegions.length,
       totalRegions: context.totalRegionCount,
       skills: context.skills.map((s) => s.name),
     });
 
-    const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
+    const request = buildLayoutDisambiguationPrompt({
+      documentName: context.documentName,
+      ambiguousRegions: context.ambiguousRegions,
+      skills: context.skills,
+      existingPatternSummary: context.existingPatternSummary,
     });
 
-    const skillDigest = context.skills
-      .map((s) => `Skill[${s.name}]: Rules: ${s.rules.slice(0, 4).join(' | ')}`)
-      .join('\n');
-
-    const promptPayload = {
-      documentName: context.documentName,
-      existingPattern: context.existingPatternSummary ?? null,
-      ambiguousRegions: context.ambiguousRegions,
-    };
-
     try {
-      const response = await ai.models.generateContent({
-        model: this.model,
-        contents: `Classify each ambiguous PDF layout region into a structured semantic decision.\n\n${skillDigest}\n\nInput:\n${JSON.stringify(
-          promptPayload
-        )}`,
-        config: {
-          systemInstruction:
-            'You are a structured PDF-to-RDLC semantic classifier. Return ONLY valid JSON decisions. Do not invent coordinates, dimensions, or RDLC XML. Use only the regionIds provided.',
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              decisions: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    regionId: { type: Type.STRING },
-                    semanticRole: { type: Type.STRING },
-                    linkedField: { type: Type.STRING },
-                    bandOverride: { type: Type.STRING },
-                    preferImageFallback: { type: Type.BOOLEAN },
-                    calculationHint: { type: Type.STRING },
-                    confidence: { type: Type.NUMBER },
-                    rationale: { type: Type.STRING },
-                  },
-                  required: ['regionId', 'semanticRole', 'confidence', 'rationale'],
-                },
-              },
-            },
-            required: ['decisions'],
-          },
-        },
-      });
-
-      const rawText = (response.text ?? '{}').trim();
-      const parsed = JSON.parse(rawText) as { decisions?: AiDecisionItem[] };
-      const validIds = new Set(context.ambiguousRegions.map((r) => r.regionId));
-      const decisions = (parsed.decisions ?? [])
-        .filter((d) => validIds.has(d.regionId))
-        .map((d) => ({
-          ...d,
-          semanticRole: VALID_ROLES.includes(d.semanticRole) ? d.semanticRole : 'unknown',
-          bandOverride: d.bandOverride && VALID_BANDS.includes(d.bandOverride) ? d.bandOverride : undefined,
-          confidence: Math.max(0, Math.min(1, Number(d.confidence) || 0.5)),
-        }));
+      const { response, validated } = await this.gateway.execute<AiDecisionItem[]>(
+        request,
+        (parsed) => validateLayoutDisambiguationResponse(context.ambiguousRegions, parsed)
+      );
 
       const reductionPercent =
         context.totalRegionCount > 0
@@ -236,27 +174,45 @@ export class GeminiAiProvider implements IAiProvider {
           : 100;
 
       this.logger.info('AI', 'AI decision accepted', {
-        decisionCount: decisions.length,
+        provider: response.provider,
+        model: response.model,
+        decisionCount: validated.length,
         tokenReductionPercent: reductionPercent,
+        usage: response.usage,
       });
 
       return {
-        provider: this.name,
-        model: this.model,
+        provider: response.provider,
+        model: response.model,
         usedSkills: context.skills.map((s) => s.name),
         tokenEstimate: {
           sentRegions: context.ambiguousRegions.length,
           totalRegions: context.totalRegionCount,
           reductionPercent,
         },
-        decisions,
+        decisions: validated,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.logger.warn('AI', `Gemini call failed (${msg}); using deterministic fallback`);
+      this.logger.warn('AI', `LLM provider "${this.name}" call failed (${msg}); using deterministic fallback`);
       return new DeterministicFallbackAiProvider(this.logger).decideSemantics(context);
     }
   }
+}
+
+export function createSemanticAiProvider(
+  logger: StructuredLogger,
+  config?: ReportGenConfig,
+  enabled = true
+): IAiProvider {
+  if (!enabled) {
+    return new DeterministicFallbackAiProvider(logger);
+  }
+  const gateway = new LLMGateway({ logger, config, enabled });
+  if (!gateway.isAvailable()) {
+    return new DeterministicFallbackAiProvider(logger);
+  }
+  return new GatewayAiProvider(logger, gateway);
 }
 
 export class DeterministicFallbackAiProvider implements IAiProvider {
@@ -282,7 +238,10 @@ export class DeterministicFallbackAiProvider implements IAiProvider {
         semanticRole = 'logoOrGraphic';
         confidence = 0.91;
         rationale = 'Complex vector cluster flagged for image fallback inside Tablix cell.';
-      } else if (/^[\$\€\£]?\s*-?\d/.test(t) && slice.nearbyLabels.some((l) => /total|subtotal|tax|net|amount/i.test(l))) {
+      } else if (
+        /^[\$\€\£]?\s*-?\d/.test(t) &&
+        slice.nearbyLabels.some((l) => /total|subtotal|tax|net|amount/i.test(l))
+      ) {
         semanticRole = 'calculationField';
         linkedField = t.replace(/[^A-Za-z0-9]/g, '') || 'CalculatedAmount';
         calculationHint = 'summary_total';
@@ -377,6 +336,12 @@ export function validateAiDecisions(
       throw new ReportGenError(
         ReportGenErrorCode.AI_DECISION_INVALID,
         `AI returned invalid semanticRole "${d.semanticRole}"`
+      );
+    }
+    if (d.bandOverride && !VALID_BANDS.includes(d.bandOverride)) {
+      throw new ReportGenError(
+        ReportGenErrorCode.AI_DECISION_INVALID,
+        `AI returned invalid bandOverride "${d.bandOverride}"`
       );
     }
   }

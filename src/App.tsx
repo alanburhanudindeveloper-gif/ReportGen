@@ -32,7 +32,11 @@ interface McpToolMeta {
   name: string;
   description: string;
   readOnly: boolean;
+  category?: 'READ_ONLY' | 'VALIDATION' | 'PROPOSAL' | 'MUTATION';
+  riskLevel?: 'low' | 'medium' | 'high';
+  approvalRequired?: boolean;
   handlerName: string;
+  command?: string;
 }
 
 export default function App() {
@@ -50,16 +54,24 @@ export default function App() {
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [mcpTools, setMcpTools] = useState<McpToolMeta[]>([]);
   const [configData, setConfigData] = useState<Record<string, unknown> | null>(null);
+  const [llmStatus, setLlmStatus] = useState<{
+    enabled: boolean;
+    provider: string;
+    model: string;
+    status: string;
+  } | null>(null);
 
   useEffect(() => {
     Promise.all([
       fetch('/api/skills').then((r) => r.json()).catch(() => ({ skills: [] })),
       fetch('/api/mcp/tools').then((r) => r.json()).catch(() => ({ tools: [] })),
       fetch('/api/config').then((r) => r.json()).catch(() => null),
-    ]).then(([s, m, c]) => {
+      fetch('/api/health').then((r) => r.json()).catch(() => null),
+    ]).then(([s, m, c, h]) => {
       setSkills(s.skills ?? []);
       setMcpTools(m.tools ?? []);
       setConfigData(c);
+      setLlmStatus(h?.llm ?? null);
     });
   }, []);
 
@@ -240,6 +252,13 @@ export default function App() {
         </nav>
 
         <div className="flex items-center gap-3 shrink-0">
+          {llmStatus && (
+            <div className="hidden xl:block text-[11px] font-mono text-slate-600 border border-slate-200 rounded px-2.5 py-1 bg-slate-50">
+              {llmStatus.provider === 'none'
+                ? 'Runtime AI: disabled · Host Agent / Deterministic'
+                : `AI: ${llmStatus.provider} · ${llmStatus.model} · ${llmStatus.status}`}
+            </div>
+          )}
           <button
             onClick={() => executePipeline(!pdfFile)}
             disabled={running}
@@ -395,7 +414,7 @@ export default function App() {
                       onChange={(e) => setUseAi(e.target.checked)}
                       className="rounded border-slate-300"
                     />
-                    Enable Gemini AI Semantic Reasoning for ambiguous regions (falls back to deterministic rules when disabled/offline)
+                    Enable AI Semantic Reasoning for ambiguous regions (uses configured LLM provider; falls back deterministically when disabled/offline)
                   </label>
 
                   <div className="flex items-center gap-3">
@@ -641,7 +660,8 @@ export default function App() {
                     <thead>
                       <tr className="border-b border-slate-200 text-slate-500">
                         <th className="py-2 pr-4 font-medium">Tool Name</th>
-                        <th className="py-2 pr-4 font-medium">Mode</th>
+                        <th className="py-2 pr-4 font-medium">Category</th>
+                        <th className="py-2 pr-4 font-medium">Approval</th>
                         <th className="py-2 pr-4 font-medium">Service Handler</th>
                         <th className="py-2 font-medium">Description</th>
                       </tr>
@@ -650,8 +670,11 @@ export default function App() {
                       {mcpTools.map((t) => (
                         <tr key={t.name}>
                           <td className="py-2 pr-4 font-mono font-semibold text-slate-900">{t.name}</td>
+                          <td className="py-2 pr-4 font-mono text-slate-700">
+                            {t.category ?? (t.readOnly ? 'READ_ONLY' : 'MUTATION')}
+                          </td>
                           <td className="py-2 pr-4 font-mono text-slate-600">
-                            {t.readOnly ? 'read-only' : 'write/exec'}
+                            {t.approvalRequired ? 'explicit required' : 'not required'}
                           </td>
                           <td className="py-2 pr-4 font-mono text-blue-700">{t.handlerName}</td>
                           <td className="py-2 text-slate-600">{t.description}</td>

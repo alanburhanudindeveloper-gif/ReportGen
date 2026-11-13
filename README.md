@@ -134,6 +134,8 @@ npm run proposal-cli -- insert --project samples/SampleProposalProject --generat
 ```bash
 npm run build
 npm run lint
+npx tsx tests/run-agent-contract-tests.ts
+npx tsx tests/run-llm-provider-tests.ts
 npx tsx tests/run-e2e-tests.ts
 npx tsx tests/run-proposal-e2e.ts
 ```
@@ -172,7 +174,7 @@ output/<PRODUCT>/
 
 ## API Endpoints (`server.ts`)
 
-- `GET /api/health` — Service & Gemini configuration check
+- `GET /api/health` — Service & configured LLM provider status (zero credentials exposed)
 - `POST /api/proposal/tech-profile` — Phase 2 `TechnologyProfile` inspection
 - `POST /api/proposal/catalog` — `ReportGen.Project.Scanner` deterministic `.vbproj`/`.csproj` & `ProposalBuilder.vb` catalog
 - `POST /api/proposal/scan` — Phase 1 + 2 project scan, parsed projects & dependency graph
@@ -186,6 +188,6 @@ output/<PRODUCT>/
 
 ## Environment Notes & Limitations
 
-- Configure `GEMINI_API_KEY` in `.env` (see `.env.example`) for optional AI semantic refinement; without a key (or with `--no-ai`), the deterministic engine completes all structural steps offline.
+- **VS Code Agent Mode (Default)**: `reportgen.config.yaml` defaults `ai.provider` to `none` so ReportGen never requests personal API keys or silently dials external LLM APIs. When opened in VS Code / Visual Studio, `.github/copilot-instructions.md`, `AGENTS.md`, and `.vscode/tasks.json` govern Agent consent, read-only vs approval-gated tools, and untrusted document boundaries. Optional runtime LLM providers (`gemini`, `openai`, `openai-compatible`, `claude`) are opt-in via `.env` or `LLM_PROVIDER`.
 - In Linux containers without `dotnet`, `msbuild`, `vbc`, or Windows Microsoft ReportViewer installed, `TechnologyProfile` sets `compilerAvailableInEnvironment: false` and ReportViewer rendering honestly reports `NOT_VERIFIED_IN_ENVIRONMENT` (`"Rendering not verified in this environment."`).
 - To compile and execute `LocalReport.Render("PDF")` on Windows with .NET 8 SDK installed, run the companion project under `dotnet/vb-runner/ReportViewerRunner.vbproj`.

@@ -1,0 +1,9 @@
+{
+  "projectRoot": "/app/applet/samples/SampleProposalProject",
+  "productCode": "EGATEST",
+  "planCode": "EGATEST-EXEC-2026",
+  "benchmarkProductCode": "MFA",
+  "pdfAFileName": "EGA-Template-PDFA.pdf",
+  "pdfBFileName": "Reference-System-PDFB.pdf",
+  "useAi": false
+}

@@ -419,7 +419,7 @@ export function ProposalWorkspace() {
               onChange={(e) => setUseAi(e.target.checked)}
               className="rounded border-slate-300"
             />
-            Use Gemini AI structured reasoning for ambiguous layout diffs &amp; status fields
+            Use configured AI provider for ambiguous layout diffs &amp; status field reasoning (falls back deterministically when disabled/offline)
           </label>
 
           <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">

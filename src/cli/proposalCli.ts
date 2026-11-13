@@ -4,12 +4,15 @@ import fs from 'fs';
 import path from 'path';
 import { loadConfig } from '../engine/core/config.ts';
 import { StructuredLogger } from '../engine/core/types.ts';
+import { wrapUntrustedData } from '../engine/core/untrustedContent.ts';
+import { MCP_TOOL_CATALOG } from '../engine/mcp/mcpTools.ts';
+import { BenchmarkInspector } from '../engine/proposal/benchmarkInspector.ts';
 import { ProjectInserter } from '../engine/proposal/projectInserter.ts';
 import { ProposalOrchestrator } from '../engine/proposal/proposalOrchestrator.ts';
 import { StagingManager } from '../engine/proposal/stagingManager.ts';
 import { buildProposalTemplatePdfA, buildReferenceSystemPdfB } from '../samples/proposalFixtures.ts';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 function getArg(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
@@ -22,9 +25,12 @@ function hasFlag(args: string[], flag: string): boolean {
 }
 
 function printHelp(): void {
-  console.log(`proposal-cli - Controlled AI-Assisted Proposal Adaptation CLI
+  console.log(`proposal-cli - Deterministic-First Proposal Adaptation CLI
 
-Commands:
+Commands (READ_ONLY):
+  tools [--category <READ_ONLY|VALIDATION|PROPOSAL|MUTATION>]
+      List machine-readable Agent tools with risk level and approval requirements.
+
   tech-profile --project <dir>
       Inspect target .vbproj/.vb/.rdlc files and output deterministic TechnologyProfile JSON.
 
@@ -35,16 +41,24 @@ Commands:
   scan --project <dir>
       Recursively discover benchmark proposal products, TechnologyProfile, and DependencyGraph.
 
+  inspect --project <dir> --product <CODE>
+      Extract compact element symbols, datasets, parameters, and RDLC structure for a benchmark product.
+
+  preview --generated <stagingDir>
+      Read-only preview of staged diff summary, affected files, test status, and approval state.
+
+Commands (PROPOSAL / VALIDATION):
   generate --project <dir> --product <CODE> [--plan <PLAN>] [--benchmark <CODE>]
            [--pdf-a <template.pdf>] [--pdf-b <reference.pdf>] [--no-ai] [--fixture]
       Analyze PDF A (+ PDF B), diff against benchmark, run Report Test Harness & DiagnosisAgent,
-      and write staged artifacts into output/<CODE>/ (never writes into project).
-
-  approve --generated <stagingDir> --by <reviewer> [--reject] [--notes <text>] [--override-warnings]
-      Record explicit human approval or rejection into <stagingDir>/approval.json.
+      and write staged artifacts into output/<CODE>/ (never writes into target project).
 
   test --generated <stagingDir>
       Inspect staged test-results.json and validation-report.json status.
+
+Commands (MUTATION — EXPLICIT APPROVAL REQUIRED):
+  approve --generated <stagingDir> --by <reviewer> [--reject] [--notes <text>] [--override-warnings]
+      Record explicit human approval or rejection into <stagingDir>/approval.json.
 
   insert --project <dir> --generated <stagingDir> (--dry-run | --confirm) [--allow-overwrite]
       Verify approval + SHA-256 hashes, check collisions, backup targets, and copy artifacts.
@@ -61,11 +75,20 @@ async function main() {
   }
 
   const config = loadConfig();
-  const logger = new StructuredLogger(true);
+  const logger = new StructuredLogger(false);
+
+  if (cmd === 'tools') {
+    const category = getArg(argv, '--category')?.toUpperCase();
+    const list = category
+      ? MCP_TOOL_CATALOG.filter((t) => t.category === category)
+      : MCP_TOOL_CATALOG;
+    console.log(JSON.stringify({ tools: list }, null, 2));
+    return;
+  }
 
   if (cmd === 'tech-profile') {
     const projectDir = getArg(argv, '--project') || 'samples/SampleProposalProject';
-    const orch = new ProposalOrchestrator(config, true);
+    const orch = new ProposalOrchestrator(config, false);
     const profile = orch.detectTechnology(projectDir);
     console.log(JSON.stringify(profile, null, 2));
     return;
@@ -73,7 +96,7 @@ async function main() {
 
   if (cmd === 'catalog') {
     const projectDir = getArg(argv, '--project') || 'samples/SampleProposalProject';
-    const orch = new ProposalOrchestrator(config, true);
+    const orch = new ProposalOrchestrator(config, false);
     const catalog = orch.buildCatalog(projectDir);
     console.log(JSON.stringify(catalog, null, 2));
     return;
@@ -81,9 +104,74 @@ async function main() {
 
   if (cmd === 'scan') {
     const projectDir = getArg(argv, '--project') || 'samples/SampleProposalProject';
-    const orch = new ProposalOrchestrator(config, true);
+    const orch = new ProposalOrchestrator(config, false);
     const result = orch.scanProject(projectDir);
     console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  if (cmd === 'inspect') {
+    const projectDir = getArg(argv, '--project') || 'samples/SampleProposalProject';
+    const productCode = getArg(argv, '--product');
+    if (!productCode) {
+      console.error('inspect requires --product <CODE>');
+      process.exit(1);
+    }
+    const orch = new ProposalOrchestrator(config, false);
+    const scan = orch.scanProject(projectDir);
+    const entry = scan.products.find(
+      (p) => p.productCode.toUpperCase() === productCode.trim().toUpperCase()
+    );
+    if (!entry) {
+      console.error(`Product "${productCode}" not found in ${projectDir}`);
+      process.exit(1);
+    }
+    const inspector = new BenchmarkInspector(logger);
+    const cacheDir = path.resolve(process.cwd(), '.reportgen-cache', 'benchmarks');
+    const details = inspector.inspect(entry, cacheDir);
+    const compact = {
+      ...details,
+      rawBuilderSource: undefined,
+      rawElementSource: undefined,
+      rawElementSources: undefined,
+      rawLayoutXml: undefined,
+      rawLayoutXmls: undefined,
+    };
+    console.log(
+      JSON.stringify(wrapUntrustedData('mixed_project', `${projectDir}:${entry.productCode}`, compact), null, 2)
+    );
+    return;
+  }
+
+  if (cmd === 'preview') {
+    const stagingDir = path.resolve(getArg(argv, '--generated') || '');
+    if (!stagingDir || !fs.existsSync(stagingDir)) {
+      console.error(`Staging directory not found: ${stagingDir}`);
+      process.exit(1);
+    }
+    const readJson = (rel: string) => {
+      const full = path.join(stagingDir, rel);
+      return fs.existsSync(full) ? JSON.parse(fs.readFileSync(full, 'utf-8')) : null;
+    };
+    const modPlan = readJson('modification-plan.json');
+    const tests = readJson('test-results.json');
+    const validation = readJson('validation-report.json');
+    const approval = readJson('approval.json');
+    console.log(
+      JSON.stringify(
+        wrapUntrustedData('mixed_project', stagingDir, {
+          stagingDir,
+          approvalStatus: approval?.status ?? 'MISSING',
+          overallTestStatus: tests?.overallStatus ?? 'UNKNOWN',
+          rdlcValid: validation?.valid ?? false,
+          rdlcSchemaVersion: modPlan?.rdlcSchemaVersion,
+          diffSummary: modPlan?.diffReport ?? null,
+          changesCount: Array.isArray(modPlan?.changes) ? modPlan.changes.length : 0,
+        }),
+        null,
+        2
+      )
+    );
     return;
   }
 
