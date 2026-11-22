@@ -10,10 +10,17 @@ function asArray<T>(val: T | T[] | undefined): T[] {
   return Array.isArray(val) ? val : [val];
 }
 
-function parseInches(val: unknown): number {
+function parseDimensionInches(val: unknown): number {
   if (typeof val !== 'string') return NaN;
-  const m = val.trim().match(/^(-?\d+(?:\.\d+)?)\s*in$/i);
-  return m ? Number(m[1]) : NaN;
+  const m = val.trim().match(/^(-?\d+(?:\.\d+)?)\s*(in|cm|mm|pt)$/i);
+  if (!m) return NaN;
+  const num = Number(m[1]);
+  const unit = m[2].toLowerCase();
+  if (unit === 'in') return num;
+  if (unit === 'cm') return num / 2.54;
+  if (unit === 'mm') return num / 25.4;
+  if (unit === 'pt') return num / 72;
+  return NaN;
 }
 
 export class RdlcValidator {
@@ -84,14 +91,21 @@ export class RdlcValidator {
       if (dsName) dataSets.set(dsName, fieldSet);
     }
 
-    // 3. Validate Tablix structure & 4. DataSet references
-    const tablixes = asArray(body?.ReportItems?.Tablix);
-    if (tablixes.length === 0) {
-      warnings.push({
-        ruleId: 'RDLC-03',
-        severity: 'WARN',
-        message: 'Report body contains zero Tablix elements.',
-      });
+    // Collect EmbeddedImages
+    const embeddedImages = new Set<string>();
+    for (const emb of asArray(report.EmbeddedImages?.EmbeddedImage)) {
+      const imgName = String(emb?.['@_Name'] ?? '').trim();
+      const b64 = String(emb?.ImageData ?? '').replace(/\s+/g, '');
+      if (!imgName || !b64) {
+        errors.push({
+          ruleId: 'RDLC-09',
+          severity: 'ERROR',
+          message: `EmbeddedImage "${imgName || '(unnamed)'}" is missing Name or ImageData.`,
+          location: 'EmbeddedImages',
+        });
+      } else {
+        embeddedImages.add(imgName);
+      }
     }
 
     const allNames = new Set<string>();
@@ -121,71 +135,185 @@ export class RdlcValidator {
       checkUniqueName(dsName, 'DataSet');
     }
 
-    for (const tbl of tablixes) {
-      const tblName = String(tbl?.['@_Name'] ?? '');
-      checkUniqueName(tblName, `Tablix(${tblName})`);
+    // 3. Recursively validate ReportItems across Body, PageHeader, PageFooter, and nested Rectangles
+    let totalTablixes = 0;
+    const validateReportItems = (reportItems: Record<string, unknown> | undefined, ctx: string) => {
+      if (!reportItems) return;
 
-      const dsRef = String(tbl?.DataSetName ?? '');
-      if (dsRef && !dataSets.has(dsRef)) {
-        errors.push({
-          ruleId: 'RDLC-04',
-          severity: 'ERROR',
-          message: `Tablix "${tblName}" references unknown DataSet "${dsRef}".`,
-          location: tblName,
-        });
+      for (const rect of asArray(reportItems.Rectangle as Record<string, unknown> | Record<string, unknown>[])) {
+        const rectName = String(rect?.['@_Name'] ?? '');
+        checkUniqueName(rectName, `${ctx}.Rectangle(${rectName})`);
+        validateReportItems(rect?.ReportItems as Record<string, unknown> | undefined, `${ctx}.${rectName}`);
       }
 
-      const cols = asArray(tbl?.TablixBody?.TablixColumns?.TablixColumn);
-      const rows = asArray(tbl?.TablixBody?.TablixRows?.TablixRow);
-      const colMembers = asArray(tbl?.TablixColumnHierarchy?.TablixMembers?.TablixMember);
-      const rowMembers = asArray(tbl?.TablixRowHierarchy?.TablixMembers?.TablixMember);
-
-      if (cols.length !== colMembers.length) {
-        errors.push({
-          ruleId: 'RDLC-03',
-          severity: 'ERROR',
-          message: `Tablix "${tblName}" TablixColumns (${cols.length}) != TablixColumnHierarchy members (${colMembers.length}).`,
-          location: tblName,
-        });
-      }
-      if (rows.length !== rowMembers.length) {
-        errors.push({
-          ruleId: 'RDLC-03',
-          severity: 'ERROR',
-          message: `Tablix "${tblName}" TablixRows (${rows.length}) != TablixRowHierarchy members (${rowMembers.length}).`,
-          location: tblName,
-        });
+      for (const tb of asArray(reportItems.Textbox as Record<string, unknown> | Record<string, unknown>[])) {
+        const tbName = String(tb?.['@_Name'] ?? '');
+        checkUniqueName(tbName, `${ctx}.Textbox(${tbName})`);
       }
 
-      rows.forEach((row, rIdx) => {
-        const cells = asArray(row?.TablixCells?.TablixCell);
-        if (cells.length !== cols.length) {
+      for (const img of asArray(reportItems.Image as Record<string, unknown> | Record<string, unknown>[])) {
+        const imgName = String(img?.['@_Name'] ?? '');
+        checkUniqueName(imgName, `${ctx}.Image(${imgName})`);
+        if (String(img?.Source ?? '') === 'Embedded') {
+          const refName = String(img?.Value ?? '').trim();
+          if (!embeddedImages.has(refName)) {
+            errors.push({
+              ruleId: 'RDLC-09',
+              severity: 'ERROR',
+              message: `Image "${imgName}" references missing EmbeddedImage "${refName}".`,
+              location: `${ctx}.${imgName}`,
+            });
+          }
+        }
+      }
+
+      for (const tbl of asArray(reportItems.Tablix as Record<string, unknown> | Record<string, unknown>[])) {
+        totalTablixes++;
+        const tblName = String(tbl?.['@_Name'] ?? '');
+        checkUniqueName(tblName, `${ctx}.Tablix(${tblName})`);
+
+        const dsRef = String(tbl?.DataSetName ?? '');
+        if (dsRef && !dataSets.has(dsRef)) {
+          errors.push({
+            ruleId: 'RDLC-04',
+            severity: 'ERROR',
+            message: `Tablix "${tblName}" references unknown DataSet "${dsRef}".`,
+            location: tblName,
+          });
+        }
+
+        const tBody = tbl?.TablixBody as Record<string, unknown> | undefined;
+        const tCols = (tBody?.TablixColumns as Record<string, unknown> | undefined)?.TablixColumn;
+        const tRows = (tBody?.TablixRows as Record<string, unknown> | undefined)?.TablixRow;
+        const tColMembers = ((tbl?.TablixColumnHierarchy as Record<string, unknown> | undefined)?.TablixMembers as Record<string, unknown> | undefined)?.TablixMember;
+        const tRowMembers = ((tbl?.TablixRowHierarchy as Record<string, unknown> | undefined)?.TablixMembers as Record<string, unknown> | undefined)?.TablixMember;
+
+        const cols = asArray(tCols as Record<string, unknown> | Record<string, unknown>[]);
+        const rows = asArray(tRows as Record<string, unknown> | Record<string, unknown>[]);
+        const colMembers = asArray(tColMembers as Record<string, unknown> | Record<string, unknown>[]);
+        const rowMembers = asArray(tRowMembers as Record<string, unknown> | Record<string, unknown>[]);
+
+        if (cols.length !== colMembers.length) {
           errors.push({
             ruleId: 'RDLC-03',
             severity: 'ERROR',
-            message: `Tablix "${tblName}" row ${rIdx} has ${cells.length} TablixCell elements, expected ${cols.length}.`,
-            location: `${tblName}.Row[${rIdx}]`,
+            message: `Tablix "${tblName}" TablixColumns (${cols.length}) != TablixColumnHierarchy members (${colMembers.length}).`,
+            location: tblName,
           });
         }
-        cells.forEach((cell) => {
-          const tb = cell?.CellContents?.Textbox;
-          if (tb) checkUniqueName(tb?.['@_Name'], `${tblName}.Textbox`);
-          const img = cell?.CellContents?.Image;
-          if (img) checkUniqueName(img?.['@_Name'], `${tblName}.Image`);
-        });
-      });
+        if (rows.length !== rowMembers.length) {
+          errors.push({
+            ruleId: 'RDLC-03',
+            severity: 'ERROR',
+            message: `Tablix "${tblName}" TablixRows (${rows.length}) != TablixRowHierarchy members (${rowMembers.length}).`,
+            location: tblName,
+          });
+        }
 
-      // 7. Validate Tablix dimensions
-      const wIn = parseInches(tbl?.Width);
-      const hIn = parseInches(tbl?.Height);
-      if (!(wIn > 0) || !(hIn > 0)) {
-        errors.push({
-          ruleId: 'RDLC-07',
-          severity: 'ERROR',
-          message: `Tablix "${tblName}" has non-positive Width/Height.`,
-          location: tblName,
+        const covered = Array.from({ length: rows.length }, () => Array(cols.length).fill(false));
+        rows.forEach((row, rIdx) => {
+          const cells = asArray((row?.TablixCells as Record<string, unknown> | undefined)?.TablixCell as Record<string, unknown> | Record<string, unknown>[]);
+          if (cells.length !== cols.length) {
+            errors.push({
+              ruleId: 'RDLC-03',
+              severity: 'ERROR',
+              message: `Tablix "${tblName}" row ${rIdx} has ${cells.length} TablixCell elements, expected ${cols.length}.`,
+              location: `${tblName}.Row[${rIdx}]`,
+            });
+          }
+          cells.forEach((cell, cIdx) => {
+            const cc = cell?.CellContents as Record<string, unknown> | undefined;
+            if (covered[rIdx]?.[cIdx]) {
+              if (cc) {
+                errors.push({
+                  ruleId: 'RDLC-03',
+                  severity: 'ERROR',
+                  message: `Tablix "${tblName}" cell [${rIdx},${cIdx}] is covered by RowSpan/ColSpan but contains CellContents.`,
+                  location: `${tblName}.Row[${rIdx}].Col[${cIdx}]`,
+                });
+              }
+              return;
+            }
+            if (cc) {
+              const colSpan = Number(cc.ColSpan ?? 1);
+              const rowSpan = Number(cc.RowSpan ?? 1);
+              if (cIdx + colSpan > cols.length || rIdx + rowSpan > rows.length) {
+                errors.push({
+                  ruleId: 'RDLC-03',
+                  severity: 'ERROR',
+                  message: `Tablix "${tblName}" cell [${rIdx},${cIdx}] span (${rowSpan}x${colSpan}) exceeds table bounds.`,
+                  location: `${tblName}.Row[${rIdx}].Col[${cIdx}]`,
+                });
+              }
+              for (let rr = rIdx; rr < Math.min(rows.length, rIdx + rowSpan); rr++) {
+                for (let ccIdx = cIdx; ccIdx < Math.min(cols.length, cIdx + colSpan); ccIdx++) {
+                  if (rr !== rIdx || ccIdx !== cIdx) covered[rr][ccIdx] = true;
+                }
+              }
+              const tb = cc.Textbox as Record<string, unknown> | undefined;
+              if (tb) checkUniqueName(tb?.['@_Name'], `${tblName}.Textbox`);
+              const img = cc.Image as Record<string, unknown> | undefined;
+              if (img) {
+                checkUniqueName(img?.['@_Name'], `${tblName}.Image`);
+                if (String(img?.Source ?? '') === 'Embedded') {
+                  const refName = String(img?.Value ?? '').trim();
+                  if (!embeddedImages.has(refName)) {
+                    errors.push({
+                      ruleId: 'RDLC-09',
+                      severity: 'ERROR',
+                      message: `Tablix Image "${img?.['@_Name']}" references missing EmbeddedImage "${refName}".`,
+                      location: tblName,
+                    });
+                  }
+                }
+              }
+            }
+          });
         });
+
+        // 7. Validate Tablix dimensions (supports in, cm, mm, pt)
+        const wIn = parseDimensionInches(tbl?.Width);
+        const hIn = parseDimensionInches(tbl?.Height);
+        if (!(wIn > 0) || !(hIn > 0)) {
+          errors.push({
+            ruleId: 'RDLC-07',
+            severity: 'ERROR',
+            message: `Tablix "${tblName}" has non-positive Width/Height.`,
+            location: tblName,
+          });
+        } else {
+          const colSumIn = cols.reduce((sum, c) => sum + parseDimensionInches(c?.Width), 0);
+          const rowSumIn = rows.reduce((sum, r) => sum + parseDimensionInches(r?.Height), 0);
+          if (Number.isFinite(colSumIn) && Math.abs(colSumIn - wIn) > 0.03) {
+            warnings.push({
+              ruleId: 'RDLC-07',
+              severity: 'WARN',
+              message: `Tablix "${tblName}" column sum (${colSumIn.toFixed(3)}in) differs from Width (${wIn.toFixed(3)}in).`,
+              location: tblName,
+            });
+          }
+          if (Number.isFinite(rowSumIn) && Math.abs(rowSumIn - hIn) > 0.03) {
+            warnings.push({
+              ruleId: 'RDLC-07',
+              severity: 'WARN',
+              message: `Tablix "${tblName}" row sum (${rowSumIn.toFixed(3)}in) differs from Height (${hIn.toFixed(3)}in).`,
+              location: tblName,
+            });
+          }
+        }
       }
+    };
+
+    validateReportItems(body?.ReportItems as Record<string, unknown> | undefined, 'Body');
+    validateReportItems(page?.PageHeader?.ReportItems as Record<string, unknown> | undefined, 'PageHeader');
+    validateReportItems(page?.PageFooter?.ReportItems as Record<string, unknown> | undefined, 'PageFooter');
+
+    if (totalTablixes === 0) {
+      warnings.push({
+        ruleId: 'RDLC-03',
+        severity: 'WARN',
+        message: 'Report body contains zero Tablix elements.',
+      });
     }
 
     // 5. Validate Field references & 6. Expression syntax
@@ -215,15 +343,31 @@ export class RdlcValidator {
       }
     }
 
-    // 8. Validate Page dimensions
-    const pageW = parseInches(page?.PageWidth);
-    const pageH = parseInches(page?.PageHeight);
+    // 8. Validate Page dimensions (supports in, cm, mm, pt) and section printable width
+    const pageW = parseDimensionInches(page?.PageWidth);
+    const pageH = parseDimensionInches(page?.PageHeight);
     if (!(pageW > 1) || !(pageH > 1)) {
       errors.push({
         ruleId: 'RDLC-08',
         severity: 'ERROR',
-        message: 'PageWidth and PageHeight must be valid dimensions > 1in.',
+        message: 'PageWidth and PageHeight must be valid dimensions > 1in (in/cm/mm/pt).',
       });
+    } else {
+      const leftM = parseDimensionInches(page?.LeftMargin);
+      const rightM = parseDimensionInches(page?.RightMargin);
+      const sectionW = parseDimensionInches(section?.Width ?? report?.Width);
+      if (
+        Number.isFinite(sectionW) &&
+        Number.isFinite(leftM) &&
+        Number.isFinite(rightM) &&
+        sectionW > pageW - leftM - rightM + 0.02
+      ) {
+        errors.push({
+          ruleId: 'RDLC-08',
+          severity: 'ERROR',
+          message: `Report Width (${sectionW.toFixed(2)}in) exceeds PageWidth - LeftMargin - RightMargin (${(pageW - leftM - rightM).toFixed(2)}in).`,
+        });
+      }
     }
 
     // 10. Validate unsupported constructs

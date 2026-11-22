@@ -37,6 +37,12 @@ interface RawVectorRect {
   lineWidthPt: number;
 }
 
+interface TextColorEvent {
+  x: number;
+  y: number;
+  color: string;
+}
+
 const PT_PER_INCH = 72;
 
 function roundIn(val: number): number {
@@ -47,6 +53,36 @@ function rgbToHex(r: number, g: number, b: number): string {
   const clamp = (n: number) => Math.max(0, Math.min(255, Math.round(n <= 1 ? n * 255 : n)));
   const toHex = (n: number) => clamp(n).toString(16).padStart(2, '0').toUpperCase();
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function normalizeColorArgs(args: unknown[]): string | undefined {
+  if (args.length === 0) return undefined;
+  const a0 = args[0];
+  if (typeof a0 === 'string') {
+    const trimmed = a0.trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) return trimmed.toUpperCase();
+    if (/^#[0-9a-fA-F]{3}$/.test(trimmed)) {
+      const h = trimmed.slice(1);
+      return `#${h[0]}${h[0]}${h[1]}${h[1]}${h[2]}${h[2]}`.toUpperCase();
+    }
+    if (/^#[0-9a-fA-F]{8}$/.test(trimmed)) return trimmed.slice(0, 7).toUpperCase();
+  }
+  if (args.length >= 3 && typeof args[0] === 'number') {
+    return rgbToHex(Number(args[0]), Number(args[1]), Number(args[2]));
+  }
+  return undefined;
+}
+
+function grayToHex(gray: number): string {
+  const v = Math.max(0, Math.min(1, gray));
+  return rgbToHex(v, v, v);
+}
+
+function cmykToHex(c: number, m: number, y: number, k: number): string {
+  const r = (1 - Math.min(1, Math.max(0, c))) * (1 - Math.min(1, Math.max(0, k)));
+  const g = (1 - Math.min(1, Math.max(0, m))) * (1 - Math.min(1, Math.max(0, k)));
+  const b = (1 - Math.min(1, Math.max(0, y))) * (1 - Math.min(1, Math.max(0, k)));
+  return rgbToHex(r, g, b);
 }
 
 function defaultStyle(): RegionStyle {
@@ -68,7 +104,12 @@ function inferFontFlags(fontName: string, loadedFontName?: string): {
   italic: boolean;
 } {
   const combined = `${fontName} ${loadedFontName ?? ''}`.toLowerCase();
-  const bold = combined.includes('bold') || combined.includes('bd') || combined.includes('black') || combined.includes('semibold');
+  const bold =
+    combined.includes('bold') ||
+    combined.includes('bd') ||
+    combined.includes('black') ||
+    combined.includes('semibold') ||
+    combined.includes('heavy');
   const italic = combined.includes('italic') || combined.includes('oblique');
   let family = 'Arial';
   if (combined.includes('times') || combined.includes('serif') || combined.includes('garamond')) {
@@ -117,7 +158,6 @@ export class PdfAnalyzer {
         throw new Error('PDF contains 0 pages');
       }
 
-      // Render raster previews via Ghostscript if available (non-fatal if unavailable)
       const pagePreviews = await this.rasterizePagesWithGhostscript(pdfBytes, dpi);
 
       const pages: LayoutPage[] = [];
@@ -132,15 +172,11 @@ export class PdfAnalyzer {
         const textContent = await page.getTextContent();
         const opList = await page.getOperatorList();
 
-        // Extract vector rectangles, lines, and image paint ops from operator list
-        const { vectorRects, imageBoxes, complexClusterBoxes } = this.extractVectorsAndImages(
-          opList,
-          viewport.height
-        );
+        const { vectorRects, imageBoxes, complexClusterBoxes, textColorEvents } =
+          this.extractVectorsAndImages(opList, viewport.height, widthIn, heightIn);
 
         const regions: LayoutRegion[] = [];
 
-        // Convert vector rectangles & lines into layout regions
         for (let idx = 0; idx < vectorRects.length; idx++) {
           const vr = vectorRects[idx];
           const isLine = vr.height <= 0.04 || vr.width <= 0.04;
@@ -156,8 +192,8 @@ export class PdfAnalyzer {
             type: isLine ? 'vector_line' : 'vector_rect',
             x: roundIn(vr.x),
             y: roundIn(vr.y),
-            width: roundIn(Math.max(0.02, vr.width)),
-            height: roundIn(Math.max(0.02, vr.height)),
+            width: roundIn(Math.max(0.015, vr.width)),
+            height: roundIn(Math.max(0.015, vr.height)),
             style,
             semanticRole: 'unknown',
             confidence: 0.95,
@@ -167,7 +203,6 @@ export class PdfAnalyzer {
           });
         }
 
-        // Convert detected images or complex vector clusters into image fallback regions
         for (let idx = 0; idx < imageBoxes.length; idx++) {
           const box = imageBoxes[idx];
           const croppedBase64 = await this.cropPageRegionToBase64(
@@ -196,14 +231,40 @@ export class PdfAnalyzer {
           });
         }
 
-        for (let idx = 0; idx < complexClusterBoxes.length; idx++) {
-          const box = complexClusterBoxes[idx];
+        const rawItems = (textContent.items as PdfTextItem[]).filter(
+          (item) => typeof item.str === 'string' && item.str.trim().length > 0
+        );
+
+        const mergedLines = this.mergeTextSpansOnSameBaseline(
+          rawItems,
+          viewport.height,
+          textContent.styles ?? {},
+          textColorEvents
+        );
+
+        // Filter out curved graphic clusters that enclose dense text (likely rounded UI cards/sections already captured as vector+text)
+        const iconClusters = complexClusterBoxes.filter((box) => {
+          const enclosedText = mergedLines.filter(
+            (ln) =>
+              ln.x >= box.x - 0.08 &&
+              ln.x + ln.width <= box.x + box.width + 0.08 &&
+              ln.y >= box.y - 0.08 &&
+              ln.y + ln.height <= box.y + box.height + 0.08
+          );
+          if (box.width > 2.2 && enclosedText.length >= 2) return false;
+          if (enclosedText.length >= 4) return false;
+          return true;
+        });
+
+        for (let idx = 0; idx < iconClusters.length; idx++) {
+          const box = iconClusters[idx];
           const croppedBase64 = await this.cropPageRegionToBase64(
             pagePreviews[pageNum - 1],
             box,
             widthIn,
             heightIn
           );
+          if (!croppedBase64) continue;
           regions.push({
             id: `region-${String(regionSeq++).padStart(4, '0')}`,
             pageNumber: pageNum,
@@ -216,8 +277,7 @@ export class PdfAnalyzer {
             semanticRole: 'logoOrGraphic',
             confidence: 0.88,
             bandKind: classifyBandHeuristic(box.y, heightIn),
-            isAmbiguous: true,
-            ambiguityReason: 'Complex vector illustration/timeline cluster; confirm image fallback vs native layout.',
+            isAmbiguous: false,
             preferImageFallback: true,
             imageAssetBase64: croppedBase64,
             imageAssetName: `VectorCluster_P${pageNum}_${idx + 1}`,
@@ -225,37 +285,52 @@ export class PdfAnalyzer {
           });
         }
 
-        // Group text spans on the same line into coherent text blocks
-        const rawItems = (textContent.items as PdfTextItem[]).filter(
-          (item) => typeof item.str === 'string' && item.str.trim().length > 0
-        );
-
-        const mergedLines = this.mergeTextSpansOnSameBaseline(rawItems, viewport.height, textContent.styles ?? {});
-
         for (let idx = 0; idx < mergedLines.length; idx++) {
           const line = mergedLines[idx];
           const bandKind = classifyBandHeuristic(line.y, heightIn);
           const fontInfo = inferFontFlags(line.fontName, line.fontLoadedName);
-          const enclosingRect = vectorRects.find(
-            (r) =>
-              line.x >= r.x - 0.05 &&
-              line.x + line.width <= r.x + r.width + 0.05 &&
-              line.y >= r.y - 0.05 &&
-              line.y + line.height <= r.y + r.height + 0.05 &&
-              r.width > 0.15 &&
-              r.height > 0.12
-          );
+          const enclosingRect = vectorRects
+            .filter(
+              (r) =>
+                line.x >= r.x - 0.08 &&
+                line.x + line.width <= r.x + r.width + 0.08 &&
+                line.y >= r.y - 0.08 &&
+                line.y + line.height <= r.y + r.height + 0.08 &&
+                r.width > 0.15 &&
+                r.height > 0.12
+            )
+            .sort((a, b) => a.width * a.height - b.width * b.height)[0];
+
+          let textAlign: 'Left' | 'Center' | 'Right' = 'Left';
+          if (enclosingRect && enclosingRect.width > 0.8) {
+            const lineCenter = line.x + line.width / 2;
+            const rectCenter = enclosingRect.x + enclosingRect.width / 2;
+            if (Math.abs(lineCenter - rectCenter) <= 0.18 && line.width < enclosingRect.width * 0.88) {
+              textAlign = 'Center';
+            } else if (
+              enclosingRect.x + enclosingRect.width - (line.x + line.width) <= 0.16 &&
+              line.x - enclosingRect.x > 0.25
+            ) {
+              textAlign = 'Right';
+            }
+          } else if (
+            Math.abs(line.x + line.width / 2 - widthIn / 2) <= 0.2 &&
+            line.width < widthIn * 0.72 &&
+            bandKind === 'Header'
+          ) {
+            textAlign = 'Center';
+          }
 
           const style: RegionStyle = {
             fontFamily: fontInfo.family,
             fontSizePt: Math.round(line.fontSizePt * 10) / 10,
             bold: fontInfo.bold,
             italic: fontInfo.italic,
-            color: '#0F172A',
+            color: line.color,
             backgroundColor: enclosingRect?.fillColor,
             borderColor: enclosingRect?.strokeColor,
             borderWidthPt: enclosingRect?.lineWidthPt,
-            textAlign: line.x > widthIn * 0.65 ? 'Right' : 'Left',
+            textAlign,
             verticalAlign: 'Middle',
             paddingPt: { top: 2, right: 4, bottom: 2, left: 4 },
           };
@@ -317,7 +392,8 @@ export class PdfAnalyzer {
   private mergeTextSpansOnSameBaseline(
     items: PdfTextItem[],
     pageHeightPt: number,
-    styles: Record<string, { fontFamily?: string }>
+    styles: Record<string, { fontFamily?: string }>,
+    textColorEvents: TextColorEvent[]
   ): Array<{
     text: string;
     x: number;
@@ -327,23 +403,40 @@ export class PdfAnalyzer {
     fontSizePt: number;
     fontName: string;
     fontLoadedName?: string;
+    color: string;
   }> {
+    const matchTextColor = (x: number, y: number): string => {
+      let bestColor = '#0F172A';
+      let bestDist = 0.25;
+      for (const ev of textColorEvents) {
+        const d = Math.hypot(ev.x - x, ev.y - y);
+        if (d < bestDist) {
+          bestDist = d;
+          bestColor = ev.color;
+        }
+      }
+      return bestColor;
+    };
+
     const normalized = items.map((it) => {
       const tx = it.transform;
-      const fontSizePt = Math.max(6, Math.hypot(tx[0], tx[1]) || Math.hypot(tx[2], tx[3]) || 10);
+      const fontSizePt = Math.max(5.5, Math.hypot(tx[0], tx[1]) || Math.hypot(tx[2], tx[3]) || 10);
       const xPt = tx[4];
+      const yBaselineIn = (pageHeightPt - tx[5]) / PT_PER_INCH;
       const yTopPt = pageHeightPt - tx[5] - fontSizePt * 0.85;
       const wPt = Math.max(it.width || it.str.length * fontSizePt * 0.5, 4);
       const hPt = Math.max(it.height || fontSizePt * 1.2, fontSizePt * 1.15);
+      const xIn = xPt / PT_PER_INCH;
       return {
         text: it.str,
-        x: xPt / PT_PER_INCH,
+        x: xIn,
         y: Math.max(0, yTopPt / PT_PER_INCH),
         width: wPt / PT_PER_INCH,
         height: hPt / PT_PER_INCH,
         fontSizePt,
         fontName: it.fontName,
         fontLoadedName: styles[it.fontName]?.fontFamily,
+        color: matchTextColor(xIn, yBaselineIn),
       };
     });
 
@@ -354,13 +447,14 @@ export class PdfAnalyzer {
       const prev = merged[merged.length - 1];
       if (
         prev &&
-        Math.abs(prev.y - cur.y) <= 0.045 &&
+        Math.abs(prev.y - cur.y) <= 0.04 &&
         cur.x - (prev.x + prev.width) >= -0.04 &&
-        cur.x - (prev.x + prev.width) <= 0.14 &&
-        Math.abs(prev.fontSizePt - cur.fontSizePt) <= 1.2
+        cur.x - (prev.x + prev.width) <= 0.12 &&
+        Math.abs(prev.fontSizePt - cur.fontSizePt) <= 1.2 &&
+        prev.color === cur.color
       ) {
         const gap = cur.x - (prev.x + prev.width);
-        const spacer = gap > 0.03 && !prev.text.endsWith(' ') && !cur.text.startsWith(' ') ? ' ' : '';
+        const spacer = gap > 0.025 && !prev.text.endsWith(' ') && !cur.text.startsWith(' ') ? ' ' : '';
         prev.text = `${prev.text}${spacer}${cur.text}`.replace(/\s+/g, ' ').trim();
         prev.width = Math.max(prev.width, cur.x + cur.width - prev.x);
         prev.height = Math.max(prev.height, cur.height);
@@ -373,21 +467,36 @@ export class PdfAnalyzer {
 
   private extractVectorsAndImages(
     opList: { fnArray: number[]; argsArray: unknown[][] },
-    pageHeightPt: number
+    pageHeightPt: number,
+    pageWidthIn: number,
+    pageHeightIn: number
   ): {
     vectorRects: RawVectorRect[];
     imageBoxes: Array<{ x: number; y: number; width: number; height: number }>;
     complexClusterBoxes: Array<{ x: number; y: number; width: number; height: number }>;
+    textColorEvents: TextColorEvent[];
   } {
     const OPS = pdfjsLib.OPS;
     const vectorRects: RawVectorRect[] = [];
     const imageBoxes: Array<{ x: number; y: number; width: number; height: number }> = [];
-    const pathPoints: Array<{ x: number; y: number }> = [];
+    const curveBoxes: Array<{ x: number; y: number; width: number; height: number }> = [];
+    const textColorEvents: TextColorEvent[] = [];
 
-    let strokeColor = '#CBD5E1';
-    let fillColor: string | undefined;
-    let lineWidthPt = 0.75;
-    let ctmStack: number[][] = [[1, 0, 0, 1, 0, 0]];
+    interface GState {
+      ctm: number[];
+      strokeColor: string;
+      fillColor?: string;
+      lineWidthPt: number;
+    }
+
+    const gStack: GState[] = [
+      {
+        ctm: [1, 0, 0, 1, 0, 0],
+        strokeColor: '#CBD5E1',
+        fillColor: undefined,
+        lineWidthPt: 0.75,
+      },
+    ];
 
     const applyCtm = (m: number[], x: number, y: number): [number, number] => [
       m[0] * x + m[2] * y + m[4],
@@ -407,24 +516,226 @@ export class PdfAnalyzer {
     let pendingLines: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
     let curX = 0;
     let curY = 0;
+    let tm = [1, 0, 0, 1, 0, 0];
+    let tlm = [1, 0, 0, 1, 0, 0];
+    let textLeading = 0;
+
+    const emitPathShapes = (
+      subpaths: Array<{ pts: Array<{ x: number; y: number }>; hasCurves: boolean }>,
+      hasFill: boolean,
+      hasStroke: boolean,
+      fillCol: string | undefined,
+      strokeCol: string,
+      lw: number
+    ) => {
+      for (const sp of subpaths) {
+        if (sp.pts.length < 2) continue;
+        const xs = sp.pts.map((p) => p.x);
+        const ys = sp.pts.map((p) => p.y);
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const minY = Math.min(...ys);
+        const maxY = Math.max(...ys);
+        const w = maxX - minX;
+        const h = maxY - minY;
+
+        if (w <= 0.008 && h <= 0.008) continue;
+
+        // Skip full-page white backdrop
+        if (
+          w > pageWidthIn - 0.15 &&
+          h > pageHeightIn - 0.15 &&
+          (!fillCol || fillCol === '#FFFFFF')
+        ) {
+          continue;
+        }
+
+        if (sp.hasCurves) {
+          if (w >= 0.1 && h >= 0.1 && w <= 3.5 && h <= 3.5) {
+            curveBoxes.push({ x: Math.max(0, minX), y: Math.max(0, minY), width: w, height: h });
+          } else if (w > 0.2 && h > 0.12 && (hasFill || hasStroke)) {
+            vectorRects.push({
+              x: Math.max(0, minX),
+              y: Math.max(0, minY),
+              width: w,
+              height: h,
+              fillColor: hasFill ? fillCol : undefined,
+              strokeColor: hasStroke ? strokeCol : undefined,
+              lineWidthPt: lw,
+            });
+          }
+          continue;
+        }
+
+        const isThinLine = h <= 0.035 || w <= 0.035;
+        if (isThinLine) {
+          vectorRects.push({
+            x: Math.max(0, minX),
+            y: Math.max(0, minY),
+            width: Math.max(0.015, w),
+            height: Math.max(0.015, h),
+            strokeColor: hasStroke ? strokeCol : fillCol,
+            fillColor: hasFill ? fillCol : undefined,
+            lineWidthPt: lw,
+          });
+        } else if (hasFill || hasStroke) {
+          vectorRects.push({
+            x: Math.max(0, minX),
+            y: Math.max(0, minY),
+            width: w,
+            height: h,
+            strokeColor: hasStroke ? strokeCol : undefined,
+            fillColor: hasFill ? fillCol : undefined,
+            lineWidthPt: lw,
+          });
+        }
+      }
+    };
 
     for (let i = 0; i < opList.fnArray.length; i++) {
       const fn = opList.fnArray[i];
       const args = opList.argsArray[i] ?? [];
-      const ctm = ctmStack[ctmStack.length - 1];
+      const gs = gStack[gStack.length - 1];
+      const ctm = gs.ctm;
 
       if (fn === OPS.save) {
-        ctmStack.push([...ctm]);
+        gStack.push({
+          ctm: [...gs.ctm],
+          strokeColor: gs.strokeColor,
+          fillColor: gs.fillColor,
+          lineWidthPt: gs.lineWidthPt,
+        });
       } else if (fn === OPS.restore) {
-        if (ctmStack.length > 1) ctmStack.pop();
+        if (gStack.length > 1) gStack.pop();
       } else if (fn === OPS.transform && args.length >= 6) {
-        ctmStack[ctmStack.length - 1] = mulMatrix(ctm, args as number[]);
+        gs.ctm = mulMatrix(ctm, args as number[]);
       } else if (fn === OPS.setLineWidth && typeof args[0] === 'number') {
-        lineWidthPt = Math.max(0.5, args[0]);
-      } else if (fn === OPS.setStrokeRGBColor && args.length >= 3) {
-        strokeColor = rgbToHex(Number(args[0]), Number(args[1]), Number(args[2]));
-      } else if (fn === OPS.setFillRGBColor && args.length >= 3) {
-        fillColor = rgbToHex(Number(args[0]), Number(args[1]), Number(args[2]));
+        gs.lineWidthPt = Math.max(0.4, args[0]);
+      } else if (fn === OPS.setStrokeRGBColor) {
+        const c = normalizeColorArgs(args);
+        if (c) gs.strokeColor = c;
+      } else if (fn === OPS.setFillRGBColor) {
+        const c = normalizeColorArgs(args);
+        if (c) gs.fillColor = c;
+      } else if (fn === OPS.setFillGray && typeof args[0] === 'number') {
+        gs.fillColor = grayToHex(args[0]);
+      } else if (fn === OPS.setStrokeGray && typeof args[0] === 'number') {
+        gs.strokeColor = grayToHex(args[0]);
+      } else if (fn === OPS.setFillCMYKColor && args.length >= 4) {
+        gs.fillColor = cmykToHex(Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]));
+      } else if (fn === OPS.setStrokeCMYKColor && args.length >= 4) {
+        gs.strokeColor = cmykToHex(Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]));
+      } else if (fn === OPS.beginText) {
+        tm = [1, 0, 0, 1, 0, 0];
+        tlm = [1, 0, 0, 1, 0, 0];
+      } else if (fn === OPS.setLeading && typeof args[0] === 'number') {
+        textLeading = Number(args[0]);
+      } else if (fn === OPS.setTextMatrix && args.length >= 1) {
+        const rawMat =
+          args.length >= 6
+            ? args
+            : args[0] && typeof (args[0] as Record<number, unknown>)[0] === 'number'
+              ? Array.from({ length: 6 }, (_, idx) => Number((args[0] as Record<number, number>)[idx]))
+              : null;
+        if (rawMat && rawMat.length >= 6) {
+          tm = [
+            Number(rawMat[0]),
+            Number(rawMat[1]),
+            Number(rawMat[2]),
+            Number(rawMat[3]),
+            Number(rawMat[4]),
+            Number(rawMat[5]),
+          ];
+          tlm = [...tm];
+        }
+      } else if ((fn === OPS.moveText || fn === OPS.setLeadingMoveText) && args.length >= 2) {
+        if (fn === OPS.setLeadingMoveText) {
+          textLeading = -Number(args[1]);
+        }
+        tlm = mulMatrix(tlm, [1, 0, 0, 1, Number(args[0]), Number(args[1])]);
+        tm = [...tlm];
+      } else if (fn === OPS.nextLine || fn === OPS.nextLineShowText || fn === OPS.nextLineSetSpacingShowText) {
+        tlm = mulMatrix(tlm, [1, 0, 0, 1, 0, -textLeading]);
+        tm = [...tlm];
+        if (fn === OPS.nextLineShowText || fn === OPS.nextLineSetSpacingShowText) {
+          const composed = mulMatrix(ctm, tm);
+          textColorEvents.push({
+            x: composed[4] / PT_PER_INCH,
+            y: (pageHeightPt - composed[5]) / PT_PER_INCH,
+            color: gs.fillColor ?? '#0F172A',
+          });
+        }
+      } else if (fn === OPS.showText || fn === OPS.showSpacedText) {
+        const composed = mulMatrix(ctm, tm);
+        const pxIn = composed[4] / PT_PER_INCH;
+        const pyIn = (pageHeightPt - composed[5]) / PT_PER_INCH;
+        textColorEvents.push({
+          x: pxIn,
+          y: pyIn,
+          color: gs.fillColor ?? '#0F172A',
+        });
+      } else if (fn === OPS.constructPath && typeof args[0] === 'number') {
+        // pdfjs-dist v6 format: [paintOp, [Float32Array of sub-ops+coords], Float32Array bbox]
+        const paintOp = args[0] as number;
+        const hasFill =
+          paintOp === OPS.fill ||
+          paintOp === OPS.eoFill ||
+          paintOp === OPS.fillStroke ||
+          paintOp === OPS.eoFillStroke;
+        const hasStroke =
+          paintOp === OPS.stroke ||
+          paintOp === OPS.closeStroke ||
+          paintOp === OPS.fillStroke ||
+          paintOp === OPS.eoFillStroke;
+
+        const rawBuf = Array.isArray(args[1]) ? (args[1][0] as ArrayLike<number> | undefined) : undefined;
+        const subpaths: Array<{ pts: Array<{ x: number; y: number }>; hasCurves: boolean }> = [];
+        let active: { pts: Array<{ x: number; y: number }>; hasCurves: boolean } | null = null;
+
+        if (rawBuf && rawBuf.length > 0) {
+          let k = 0;
+          while (k < rawBuf.length) {
+            const code = rawBuf[k++];
+            if (code === 0 && k + 1 < rawBuf.length) {
+              // MOVE_TO
+              if (active && active.pts.length >= 2) subpaths.push(active);
+              const [px, py] = applyCtm(ctm, Number(rawBuf[k]), Number(rawBuf[k + 1]));
+              active = {
+                pts: [{ x: px / PT_PER_INCH, y: (pageHeightPt - py) / PT_PER_INCH }],
+                hasCurves: false,
+              };
+              k += 2;
+            } else if (code === 1 && k + 1 < rawBuf.length) {
+              // LINE_TO
+              const [px, py] = applyCtm(ctm, Number(rawBuf[k]), Number(rawBuf[k + 1]));
+              if (!active) active = { pts: [], hasCurves: false };
+              active.pts.push({ x: px / PT_PER_INCH, y: (pageHeightPt - py) / PT_PER_INCH });
+              k += 2;
+            } else if (code === 2 && k + 5 < rawBuf.length) {
+              // CURVE_TO (6 args)
+              const [px, py] = applyCtm(ctm, Number(rawBuf[k + 4]), Number(rawBuf[k + 5]));
+              if (!active) active = { pts: [], hasCurves: false };
+              active.hasCurves = true;
+              active.pts.push({ x: px / PT_PER_INCH, y: (pageHeightPt - py) / PT_PER_INCH });
+              k += 6;
+            } else if (code === 3 && k + 3 < rawBuf.length) {
+              // QUADRATIC_TO (4 args)
+              const [px, py] = applyCtm(ctm, Number(rawBuf[k + 2]), Number(rawBuf[k + 3]));
+              if (!active) active = { pts: [], hasCurves: false };
+              active.hasCurves = true;
+              active.pts.push({ x: px / PT_PER_INCH, y: (pageHeightPt - py) / PT_PER_INCH });
+              k += 4;
+            } else if (code === 4) {
+              // CLOSE_PATH
+              if (active && active.pts.length >= 2) subpaths.push(active);
+              active = null;
+            } else {
+              break;
+            }
+          }
+          if (active && active.pts.length >= 2) subpaths.push(active);
+        }
+        emitPathShapes(subpaths, hasFill, hasStroke, gs.fillColor, gs.strokeColor, gs.lineWidthPt);
       } else if (fn === OPS.rectangle && args.length >= 4) {
         const [rx, ry, rw, rh] = args as number[];
         const [x1, y1] = applyCtm(ctm, rx, ry);
@@ -443,7 +754,6 @@ export class PdfAnalyzer {
         const [px, py] = applyCtm(ctm, Number(args[0]), Number(args[1]));
         curX = px;
         curY = pageHeightPt - py;
-        pathPoints.push({ x: curX / PT_PER_INCH, y: curY / PT_PER_INCH });
       } else if (fn === OPS.lineTo && args.length >= 2) {
         const [px, py] = applyCtm(ctm, Number(args[0]), Number(args[1]));
         const nextX = px;
@@ -480,15 +790,10 @@ export class PdfAnalyzer {
             curY = nextY;
             ci += 2;
           } else if (sop === OPS.curveTo) {
-            pathPoints.push({ x: curX / PT_PER_INCH, y: curY / PT_PER_INCH });
             ci += 6;
           } else if (sop === OPS.rectangle) {
-            const rx = coords[ci];
-            const ry = coords[ci + 1];
-            const rw = coords[ci + 2];
-            const rh = coords[ci + 3];
-            const [x1, y1] = applyCtm(ctm, rx, ry);
-            const [x2, y2] = applyCtm(ctm, rx + rw, ry + rh);
+            const [x1, y1] = applyCtm(ctm, coords[ci], coords[ci + 1]);
+            const [x2, y2] = applyCtm(ctm, coords[ci] + coords[ci + 2], coords[ci + 1] + coords[ci + 3]);
             pendingRects.push({
               x: Math.min(x1, x2) / PT_PER_INCH,
               y: (pageHeightPt - Math.max(y1, y2)) / PT_PER_INCH,
@@ -521,9 +826,9 @@ export class PdfAnalyzer {
               y: Math.max(0, r.y),
               width: r.w,
               height: r.h,
-              strokeColor: hasStroke ? strokeColor : undefined,
-              fillColor: hasFill ? fillColor : undefined,
-              lineWidthPt,
+              strokeColor: hasStroke ? gs.strokeColor : undefined,
+              fillColor: hasFill ? gs.fillColor : undefined,
+              lineWidthPt: gs.lineWidthPt,
             });
           }
         }
@@ -536,8 +841,8 @@ export class PdfAnalyzer {
               y: Math.max(0, Math.min(ln.y1, ln.y2)),
               width: Math.max(0.015, w),
               height: Math.max(0.015, h),
-              strokeColor: hasStroke ? strokeColor : fillColor,
-              lineWidthPt,
+              strokeColor: hasStroke ? gs.strokeColor : gs.fillColor,
+              lineWidthPt: gs.lineWidthPt,
             });
           }
         }
@@ -547,7 +852,6 @@ export class PdfAnalyzer {
         pendingRects = [];
         pendingLines = [];
       } else if (fn === OPS.paintImageXObject || fn === OPS.paintInlineImageXObject) {
-        // CTM maps unit square [0,0]-[1,1] into page user space
         const [x1, y1] = applyCtm(ctm, 0, 0);
         const [x2, y2] = applyCtm(ctm, 1, 1);
         const minX = Math.min(x1, x2) / PT_PER_INCH;
@@ -565,26 +869,39 @@ export class PdfAnalyzer {
       }
     }
 
-    // Detect dense curve/complex vector regions as image fallback candidates
+    // Merge nearby/overlapping curved graphics into tight icon/badge clusters
     const complexClusterBoxes: Array<{ x: number; y: number; width: number; height: number }> = [];
-    if (pathPoints.length >= 12) {
-      const xs = pathPoints.map((p) => p.x);
-      const ys = pathPoints.map((p) => p.y);
-      const minX = Math.min(...xs);
-      const maxX = Math.max(...xs);
-      const minY = Math.min(...ys);
-      const maxY = Math.max(...ys);
-      if (maxX - minX > 0.3 && maxY - minY > 0.3 && maxX - minX < 7.5 && maxY - minY < 4.5) {
-        complexClusterBoxes.push({
-          x: Math.max(0, minX),
-          y: Math.max(0, minY),
-          width: maxX - minX,
-          height: maxY - minY,
-        });
+    const pad = 0.12;
+    for (const cb of curveBoxes) {
+      const merged = complexClusterBoxes.find(
+        (existing) =>
+          cb.x <= existing.x + existing.width + pad &&
+          cb.x + cb.width >= existing.x - pad &&
+          cb.y <= existing.y + existing.height + pad &&
+          cb.y + cb.height >= existing.y - pad
+      );
+      if (merged) {
+        const x1 = Math.min(merged.x, cb.x);
+        const y1 = Math.min(merged.y, cb.y);
+        const x2 = Math.max(merged.x + merged.width, cb.x + cb.width);
+        const y2 = Math.max(merged.y + merged.height, cb.y + cb.height);
+        merged.x = x1;
+        merged.y = y1;
+        merged.width = x2 - x1;
+        merged.height = y2 - y1;
+      } else {
+        complexClusterBoxes.push({ ...cb });
       }
     }
 
-    return { vectorRects, imageBoxes, complexClusterBoxes };
+    return {
+      vectorRects,
+      imageBoxes,
+      complexClusterBoxes: complexClusterBoxes.filter(
+        (b) => b.width >= 0.18 && b.height >= 0.18 && b.width <= 3.6 && b.height <= 3.6
+      ),
+      textColorEvents,
+    };
   }
 
   public async rasterizePagesWithGhostscript(pdfBytes: Uint8Array, dpi = 144): Promise<Buffer[]> {

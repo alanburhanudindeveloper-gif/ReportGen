@@ -37,6 +37,9 @@ Options:
 ### `reportgen render <report.rdlc>`
 (`VALIDATION`) Invokes ReportViewer rendering when `dotnet` and `REPORTVIEWER_CLI_PATH` are available; otherwise reports `Rendering not verified in this environment.`
 
+### `reportgen render-preview <outputDirOrRdlcFile> [--out <preview.html>] [--stdout]`
+(`VALIDATION`) Parses an RDLC 2008/2016 XML file (supports `cm`, `in`, `mm`, `pt`, nested `<Rectangle>` containers, `<Tablix>` `ColSpan`/`RowSpan`, `<ReportParameters>`, and `<EmbeddedImages>`) into a standalone 1:1 coordinate-locked `preview.html` with bounding-box collision diagnostics.
+
 ### `reportgen compare <original.pdf> <generated.pdf> [--out <visual-diff>]`
 (`VALIDATION`) Rasterizes both PDFs with Ghostscript and computes per-page pixel similarity with `pixelmatch`.
 

@@ -34,7 +34,7 @@ async function startServer() {
     limits: { fileSize: 25 * 1024 * 1024 },
   });
 
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '50mb' }));
 
   app.get('/api/health', (_req, res) => {
     const config = loadConfig();
@@ -180,6 +180,156 @@ async function startServer() {
       return res.json(validator.validate(rdlcXml));
     } catch (err) {
       return res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post('/api/pipeline/preview-html', (req, res) => {
+    try {
+      const { rdlcXml, title, sampleFields } = (req.body ?? {}) as {
+        rdlcXml?: string;
+        title?: string;
+        sampleFields?: Record<string, unknown>;
+      };
+      if (!rdlcXml || typeof rdlcXml !== 'string') {
+        return res.status(400).json({ error: 'rdlcXml string is required' });
+      }
+      const config = loadConfig();
+      const services = createReportGenServices(config, false);
+      const preview = services.rdlcPreviewRenderer.renderHtml(rdlcXml, { title, sampleFields });
+      return res.json(preview);
+    } catch (err) {
+      return res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post('/api/pipeline/preview-pdf', async (req, res) => {
+    try {
+      const { rdlcXml, title, filename, sampleFields } = (req.body ?? {}) as {
+        rdlcXml?: string;
+        title?: string;
+        filename?: string;
+        sampleFields?: Record<string, unknown>;
+      };
+      if (!rdlcXml || typeof rdlcXml !== 'string') {
+        return res.status(400).json({ error: 'rdlcXml string is required' });
+      }
+      const config = loadConfig();
+      const services = createReportGenServices(config, false);
+      const pdfBytes = await services.rdlcPreviewRenderer.renderPdf(rdlcXml, { title, sampleFields });
+      const safeBase = String(filename || title || 'rdlc-preview')
+        .replace(/\.pdf$/i, '')
+        .replace(/[^A-Za-z0-9._-]+/g, '_');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeBase}.pdf"`);
+      return res.send(Buffer.from(pdfBytes));
+    } catch (err) {
+      return res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get('/api/outputs', (_req, res) => {
+    try {
+      const outputRoot = path.resolve(process.cwd(), 'output');
+      if (!fs.existsSync(outputRoot)) {
+        return res.json({ outputs: [] });
+      }
+      const entries = fs.readdirSync(outputRoot, { withFileTypes: true });
+      const outputs = entries
+        .filter((e) => e.isDirectory())
+        .map((e) => {
+          const dirPath = path.join(outputRoot, e.name);
+          const files = fs.readdirSync(dirPath);
+          const rdlcFile = files.find((f) => f.endsWith('.rdlc'));
+          const hasPreviewHtml = files.includes('preview.html');
+          if (!rdlcFile) return null;
+          const rdlcPath = path.join(dirPath, rdlcFile);
+          return {
+            folder: e.name,
+            rdlcFile,
+            rdlcBytes: fs.statSync(rdlcPath).size,
+            hasPreviewHtml,
+          };
+        })
+        .filter(Boolean);
+      return res.json({ outputs });
+    } catch (err) {
+      return res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get('/api/outputs/:folder/preview', (req, res) => {
+    try {
+      const folder = String(req.params.folder || '').trim();
+      if (!folder || !/^[A-Za-z0-9._-]+$/.test(folder)) {
+        return res.status(400).json({ error: 'Invalid output folder name.' });
+      }
+      const outputRoot = path.resolve(process.cwd(), 'output');
+      const targetDir = resolveSafeSubpath(outputRoot, folder);
+      if (!fs.existsSync(targetDir) || !fs.statSync(targetDir).isDirectory()) {
+        return res.status(404).json({ error: 'Output folder not found.' });
+      }
+      const files = fs.readdirSync(targetDir);
+      const rdlcFile = files.find((f) => f.endsWith('.rdlc'));
+      if (!rdlcFile) {
+        return res.status(404).json({ error: 'No .rdlc file found in output folder.' });
+      }
+      const rdlcXml = fs.readFileSync(path.join(targetDir, rdlcFile), 'utf-8');
+      const dummyPath = ['dummy-data.json', 'dummy.json']
+        .map((f) => path.join(targetDir, f))
+        .find((p) => fs.existsSync(p));
+      const sampleFields = dummyPath ? (JSON.parse(fs.readFileSync(dummyPath, 'utf-8')) as Record<string, unknown>) : undefined;
+      const config = loadConfig();
+      const services = createReportGenServices(config, false);
+      const validation = new RdlcValidator(services.logger).validate(rdlcXml);
+      const preview = services.rdlcPreviewRenderer.renderHtml(rdlcXml, {
+        title: `${folder} (${rdlcFile})`,
+        sampleFields,
+      });
+      return res.json({
+        folder,
+        rdlcFile,
+        rdlcBytes: Buffer.byteLength(rdlcXml, 'utf-8'),
+        validation,
+        preview,
+      });
+    } catch (err) {
+      return res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get('/api/outputs/:folder/pdf', async (req, res) => {
+    try {
+      const folder = String(req.params.folder || '').trim();
+      if (!folder || !/^[A-Za-z0-9._-]+$/.test(folder)) {
+        return res.status(400).json({ error: 'Invalid output folder name.' });
+      }
+      const outputRoot = path.resolve(process.cwd(), 'output');
+      const targetDir = resolveSafeSubpath(outputRoot, folder);
+      if (!fs.existsSync(targetDir) || !fs.statSync(targetDir).isDirectory()) {
+        return res.status(404).json({ error: 'Output folder not found.' });
+      }
+      const files = fs.readdirSync(targetDir);
+      const rdlcFile = files.find((f) => f.endsWith('.rdlc'));
+      if (!rdlcFile) {
+        return res.status(404).json({ error: 'No .rdlc file found in output folder.' });
+      }
+      const rdlcXml = fs.readFileSync(path.join(targetDir, rdlcFile), 'utf-8');
+      const dummyPath = ['dummy-data.json', 'dummy.json']
+        .map((f) => path.join(targetDir, f))
+        .find((p) => fs.existsSync(p));
+      const sampleFields = dummyPath ? (JSON.parse(fs.readFileSync(dummyPath, 'utf-8')) as Record<string, unknown>) : undefined;
+      const config = loadConfig();
+      const services = createReportGenServices(config, false);
+      const pdfBytes = await services.rdlcPreviewRenderer.renderPdf(rdlcXml, {
+        title: `${folder} (${rdlcFile})`,
+        sampleFields,
+      });
+      const safeBase = path.basename(rdlcFile, '.rdlc').replace(/[^A-Za-z0-9._-]+/g, '_');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeBase}.pdf"`);
+      return res.send(Buffer.from(pdfBytes));
+    } catch (err) {
+      return res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 

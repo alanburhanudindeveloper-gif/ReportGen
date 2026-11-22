@@ -255,8 +255,8 @@ export class GridReconstructor {
     pageWidthIn: number,
     tolerance: number
   ): ReconstructedBand {
-    const minX = Math.max(0.25, Math.min(...bandRegions.map((r) => r.x)));
-    const maxX = Math.min(pageWidthIn - 0.25, Math.max(...bandRegions.map((r) => r.x + r.width)));
+    const minX = Math.max(0, Math.min(...bandRegions.map((r) => r.x)));
+    const maxX = Math.min(pageWidthIn, Math.max(...bandRegions.map((r) => r.x + r.width)));
     const minY = Math.min(...bandRegions.map((r) => r.y));
     const maxY = Math.max(...bandRegions.map((r) => r.y + r.height));
 
@@ -394,12 +394,7 @@ export class GridReconstructor {
       }
     }
 
-    const distinctYRows = numRows;
-    const isRepeatingDetail =
-      bandKind === 'Detail' &&
-      distinctYRows >= 3 &&
-      numCols >= 2 &&
-      bandRegions.filter((r) => r.type === 'text').length >= 6;
+    const isRepeatingDetail = this.isLikelyRepeatingLineItemTable(bandKind, bandRegions);
 
     return {
       id: `band-p${pageNumber}-${bandIndex}`,
@@ -418,5 +413,70 @@ export class GridReconstructor {
       isRepeatingDetail,
       sourceRegionIds: bandRegions.map((r) => r.id),
     };
+  }
+
+  private isLikelyRepeatingLineItemTable(
+    bandKind: BandKind,
+    bandRegions: LayoutRegion[]
+  ): boolean {
+    if (bandKind !== 'Detail') return false;
+
+    const textRegions = bandRegions
+      .filter((r) => r.type === 'text' && r.text && r.text.trim().length > 0)
+      .sort((a, b) => (Math.abs(a.y - b.y) <= 0.08 ? a.x - b.x : a.y - b.y));
+    if (textRegions.length < 6) return false;
+
+    const logicalRows: LayoutRegion[][] = [];
+    for (const r of textRegions) {
+      const last = logicalRows[logicalRows.length - 1];
+      if (!last || Math.abs(last[0].y - r.y) > 0.08) {
+        logicalRows.push([r]);
+      } else {
+        last.push(r);
+      }
+    }
+    if (logicalRows.length < 3) return false;
+
+    for (const row of logicalRows) {
+      row.sort((a, b) => a.x - b.x);
+    }
+
+    const headerRow = logicalRows[0];
+    if (headerRow.length < 3 || headerRow.length > 10) return false;
+
+    const numericRe = /^[\$\€\£\-\+]?\s*\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?\s*%?$/;
+    const headerKeywordsRe = /\b(qty|quantity|price|rate|discount|amount|total|subtotal|unit|linetotal)\b/i;
+
+    let headerKeywordHits = 0;
+    for (const h of headerRow) {
+      const txt = (h.text ?? '').trim();
+      if (txt.length > 40) return false;
+      if (headerKeywordsRe.test(txt)) headerKeywordHits++;
+    }
+
+    let dataCellCount = 0;
+    let totalDataChars = 0;
+    let maxDataCellLen = 0;
+    let populatedDataRows = 0;
+    let numericDataCells = 0;
+
+    for (let r = 1; r < logicalRows.length; r++) {
+      const row = logicalRows[r];
+      if (row.length >= 2) populatedDataRows++;
+      for (const cell of row) {
+        const txt = (cell.text ?? '').trim();
+        if (!txt) continue;
+        dataCellCount++;
+        totalDataChars += txt.length;
+        maxDataCellLen = Math.max(maxDataCellLen, txt.length);
+        if (numericRe.test(txt)) numericDataCells++;
+      }
+    }
+
+    if (populatedDataRows < 2 || dataCellCount === 0) return false;
+    const avgLen = totalDataChars / dataCellCount;
+    if (avgLen > 45 || maxDataCellLen > 85) return false;
+
+    return headerKeywordHits >= 2 || (headerKeywordHits >= 1 && numericDataCells >= 2);
   }
 }

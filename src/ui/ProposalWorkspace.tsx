@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   CheckCircle2,
   Code2,
+  Eye,
+  FileDown,
   FolderSearch,
   Play,
   ShieldCheck,
@@ -17,7 +19,7 @@ import type {
   StagingApprovalState,
 } from '../engine/proposal/types.ts';
 
-type StagingTab = 'builder' | 'element' | 'rdlc' | 'extraRdlc' | 'scenarios' | 'definition' | 'dummy';
+type StagingTab = 'preview' | 'builder' | 'element' | 'rdlc' | 'extraRdlc' | 'scenarios' | 'definition' | 'dummy';
 
 export function ProposalWorkspace() {
   const [projectRoot, setProjectRoot] = useState('samples/SampleProposalProject');
@@ -35,6 +37,10 @@ export function ProposalWorkspace() {
 
   const [editedValues, setEditedValues] = useState<Record<string, string>>({});
   const [stagingTab, setStagingTab] = useState<StagingTab>('builder');
+  const [previewHtml, setPreviewHtml] = useState<string | null>(null);
+  const [previewMeta, setPreviewMeta] = useState<{ pageCount: number; pageWidth: string; pageHeight: string } | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
   const [reviewer, setReviewer] = useState('lead-actuary-reviewer');
   const [approvalNotes, setApprovalNotes] = useState('Verified layout fidelity and mock markers.');
   const [approvalState, setApprovalState] = useState<StagingApprovalState | null>(null);
@@ -90,6 +96,8 @@ export function ProposalWorkspace() {
       setRunResult(data);
       setApprovalState(data.staging.approval);
       setEditedValues({});
+      setPreviewHtml(null);
+      setPreviewMeta(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -197,7 +205,78 @@ export function ProposalWorkspace() {
   };
 
   const [selectedExtraRdlcIdx, setSelectedExtraRdlcIdx] = useState(0);
+  const [selectedPreviewRdlcIdx, setSelectedPreviewRdlcIdx] = useState(0);
   const [section4View, setSection4View] = useState<'plan' | 'diff'>('plan');
+
+  const previewRdlcCandidates = runResult
+    ? [
+        { label: `${runResult.productCode} Main Layout.rdlc`, xml: runResult.layoutRdlcXml },
+        ...(runResult.additionalRdlcFiles ?? []).map((f) => ({ label: f.fileName, xml: f.xml })),
+      ]
+    : [];
+
+  const loadProposalPreview = async (idxOverride?: number) => {
+    if (!runResult) return;
+    const targetIdx = idxOverride ?? selectedPreviewRdlcIdx;
+    const item = previewRdlcCandidates[targetIdx] ?? previewRdlcCandidates[0];
+    if (!item) return;
+    setPreviewBusy(true);
+    setError(null);
+    try {
+      const resp = await fetch('/api/pipeline/preview-html', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rdlcXml: item.xml,
+          title: `${runResult.productCode} — ${item.label}`,
+          sampleFields: runResult.dummyDataJson,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to render RDLC preview');
+      setPreviewHtml(data.html);
+      setPreviewMeta({ pageCount: data.pageCount, pageWidth: data.pageWidth, pageHeight: data.pageHeight });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPreviewBusy(false);
+    }
+  };
+
+  const downloadProposalPdf = async () => {
+    if (!runResult) return;
+    const item = previewRdlcCandidates[selectedPreviewRdlcIdx] ?? previewRdlcCandidates[0];
+    if (!item) return;
+    setPdfBusy(true);
+    setError(null);
+    try {
+      const resp = await fetch('/api/pipeline/preview-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rdlcXml: item.xml,
+          title: `${runResult.productCode} — ${item.label}`,
+          filename: `${runResult.productCode}_${item.label.replace(/\.rdlc$/i, '')}`,
+          sampleFields: runResult.dummyDataJson,
+        }),
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({ error: 'PDF render failed' }));
+        throw new Error(data.error || 'PDF render failed');
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${runResult.productCode}_RDLC_Preview.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPdfBusy(false);
+    }
+  };
 
   const stagedCodePreview = (() => {
     if (!runResult) return '';
@@ -770,6 +849,7 @@ export function ProposalWorkspace() {
                 <div className="flex flex-wrap gap-1">
                   {(
                     [
+                      ['preview', 'Visual Preview'],
                       ['builder', 'Builder.vb'],
                       ['element', 'Element.vb'],
                       ['rdlc', 'Layout.rdlc (2008)'],
@@ -785,7 +865,12 @@ export function ProposalWorkspace() {
                   ).map(([id, label]) => (
                     <button
                       key={id}
-                      onClick={() => setStagingTab(id)}
+                      onClick={() => {
+                        setStagingTab(id);
+                        if (id === 'preview') {
+                          void loadProposalPreview();
+                        }
+                      }}
                       className={`px-2 py-1 text-[11px] font-mono rounded border whitespace-nowrap shrink-0 ${
                         stagingTab === id
                           ? 'bg-slate-900 text-white border-slate-900'
@@ -797,27 +882,80 @@ export function ProposalWorkspace() {
                   ))}
                 </div>
               </div>
-              {stagingTab === 'extraRdlc' && runResult.additionalRdlcFiles && runResult.additionalRdlcFiles.length > 1 && (
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="text-slate-600">Additional RDLC:</span>
-                  {runResult.additionalRdlcFiles.map((f, idx) => (
+              {stagingTab === 'preview' ? (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {previewRdlcCandidates.map((cand, idx) => (
+                        <button
+                          key={cand.label}
+                          onClick={() => {
+                            setSelectedPreviewRdlcIdx(idx);
+                            void loadProposalPreview(idx);
+                          }}
+                          className={`px-2 py-1 text-[11px] font-mono rounded border whitespace-nowrap shrink-0 ${
+                            selectedPreviewRdlcIdx === idx
+                              ? 'bg-slate-900 text-white border-slate-900'
+                              : 'bg-white text-slate-700 border-slate-300'
+                          }`}
+                        >
+                          <Eye className="w-3 h-3 inline mr-1" />
+                          {cand.label}
+                        </button>
+                      ))}
+                    </div>
                     <button
-                      key={f.fileName}
-                      onClick={() => setSelectedExtraRdlcIdx(idx)}
-                      className={`px-2 py-0.5 font-mono text-[11px] rounded border whitespace-nowrap shrink-0 ${
-                        selectedExtraRdlcIdx === idx
-                          ? 'bg-slate-900 text-white border-slate-900'
-                          : 'bg-white text-slate-700 border-slate-300'
-                      }`}
+                      onClick={downloadProposalPdf}
+                      disabled={pdfBusy}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
                     >
-                      {f.fileName}
+                      <FileDown className="w-3.5 h-3.5" />
+                      {pdfBusy ? 'Rendering PDF...' : 'Download PDF'}
                     </button>
-                  ))}
+                  </div>
+                  {previewMeta && (
+                    <div className="text-[11px] font-mono text-slate-500">
+                      Pages: {previewMeta.pageCount} ({previewMeta.pageWidth} × {previewMeta.pageHeight})
+                    </div>
+                  )}
+                  {previewBusy ? (
+                    <div className="h-80 flex items-center justify-center bg-slate-900 text-slate-300 text-xs font-mono rounded-md">
+                      Rendering RDLC Visual Preview...
+                    </div>
+                  ) : previewHtml ? (
+                    <iframe
+                      title="Proposal RDLC Visual Preview"
+                      srcDoc={previewHtml}
+                      sandbox=""
+                      className="w-full h-96 rounded-md border border-slate-300 bg-slate-900"
+                    />
+                  ) : null}
                 </div>
+              ) : (
+                <>
+                  {stagingTab === 'extraRdlc' && runResult.additionalRdlcFiles && runResult.additionalRdlcFiles.length > 1 && (
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-slate-600">Additional RDLC:</span>
+                      {runResult.additionalRdlcFiles.map((f, idx) => (
+                        <button
+                          key={f.fileName}
+                          onClick={() => setSelectedExtraRdlcIdx(idx)}
+                          className={`px-2 py-0.5 font-mono text-[11px] rounded border whitespace-nowrap shrink-0 ${
+                            selectedExtraRdlcIdx === idx
+                              ? 'bg-slate-900 text-white border-slate-900'
+                              : 'bg-white text-slate-700 border-slate-300'
+                          }`}
+                        >
+                          {f.fileName}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <pre className="bg-slate-950 text-slate-100 rounded-md p-3 text-[11px] font-mono overflow-auto max-h-80">
+                    {stagedCodePreview}
+                  </pre>
+                </>
               )}
-              <pre className="bg-slate-950 text-slate-100 rounded-md p-3 text-[11px] font-mono overflow-auto max-h-80">
-                {stagedCodePreview}
-              </pre>
             </div>
           </div>
 

@@ -1,26 +1,107 @@
-import { useState } from 'react';
-import { Download, FolderOutput, ShieldCheck } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Download, Eye, FileDown, FolderOutput, ShieldCheck } from 'lucide-react';
 import { FrontendPipelineResult } from './types.ts';
 
 interface ArtifactsPanelProps {
   result: FrontendPipelineResult;
+  initialTab?: ArtifactTab;
 }
 
-type ArtifactTab = 'rdlc' | 'vb' | 'dummy' | 'definition';
+export type ArtifactTab = 'rdlc' | 'preview' | 'vb' | 'dummy' | 'definition';
 
-export function ArtifactsPanel({ result }: ArtifactsPanelProps) {
-  const [activeTab, setActiveTab] = useState<ArtifactTab>('rdlc');
+interface RdlcPreviewState {
+  html: string;
+  pageCount: number;
+  pageWidth: string;
+  pageHeight: string;
+  stats: {
+    rectangles: number;
+    tablixes: number;
+    mergedCells: number;
+    textboxes: number;
+    images: number;
+    embeddedImages: number;
+    parameters: number;
+  };
+  collisions: Array<{ page: number; container: string; itemA: string; itemB: string; overlapCm: string }>;
+}
+
+async function readJsonSafe(resp: Response): Promise<Record<string, unknown>> {
+  const txt = await resp.text();
+  try {
+    return JSON.parse(txt) as Record<string, unknown>;
+  } catch {
+    throw new Error(txt.slice(0, 200) || `HTTP ${resp.status}`);
+  }
+}
+
+export function ArtifactsPanel({ result, initialTab }: ArtifactsPanelProps) {
+  const [activeTab, setActiveTab] = useState<ArtifactTab>(initialTab ?? 'rdlc');
   const [rdlcText, setRdlcText] = useState(result.rdlcXml);
   const [validationState, setValidationState] = useState(result.rdlcValidation);
   const [validating, setValidating] = useState(false);
+
+  const [previewData, setPreviewData] = useState<RdlcPreviewState | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   const [outputSubdir, setOutputSubdir] = useState(`Generated/${result.reportDefinition.reportName}`);
   const [forceOverwrite, setForceOverwrite] = useState(false);
   const [integrateStatus, setIntegrateStatus] = useState<{ ok: boolean; message: string } | null>(null);
 
+  const loadVisualPreview = async (xmlOverride?: string) => {
+    const xml = xmlOverride ?? rdlcText;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    try {
+      const resp = await fetch('/api/pipeline/preview-html', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rdlcXml: xml,
+          title: `${result.reportDefinition.reportName} — RDLC Visual Preview`,
+          sampleFields: result.dummyJson,
+        }),
+      });
+      const data = await readJsonSafe(resp);
+      if (!resp.ok) throw new Error(String(data.error ?? 'Failed to render RDLC preview'));
+      setPreviewData(data as unknown as RdlcPreviewState);
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    setRdlcText(result.rdlcXml);
+    setValidationState(result.rdlcValidation);
+    setOutputSubdir(`Generated/${result.reportDefinition.reportName}`);
+    setPreviewData(null);
+    setPreviewError(null);
+    setIntegrateStatus(null);
+    if (activeTab === 'preview') {
+      void loadVisualPreview(result.rdlcXml);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result]);
+
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+      if (initialTab === 'preview') {
+        void loadVisualPreview(result.rdlcXml);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialTab]);
+
   const activeContent =
     activeTab === 'rdlc'
       ? rdlcText
+      : activeTab === 'preview'
+      ? previewData?.html ?? ''
       : activeTab === 'vb'
       ? result.vbCode
       : activeTab === 'dummy'
@@ -30,6 +111,8 @@ export function ArtifactsPanel({ result }: ArtifactsPanelProps) {
   const activeFilename =
     activeTab === 'rdlc'
       ? `${result.reportDefinition.reportName}.rdlc`
+      : activeTab === 'preview'
+      ? `${result.reportDefinition.reportName}-preview.html`
       : activeTab === 'vb'
       ? `${result.reportDefinition.reportName}.vb`
       : activeTab === 'dummy'
@@ -37,13 +120,53 @@ export function ArtifactsPanel({ result }: ArtifactsPanelProps) {
       : 'report-definition.json';
 
   const handleDownload = () => {
-    const blob = new Blob([activeContent], { type: 'text/plain;charset=utf-8' });
+    const mime = activeTab === 'preview' ? 'text/html;charset=utf-8' : 'text/plain;charset=utf-8';
+    const blob = new Blob([activeContent], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = activeFilename;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadPdf = async () => {
+    setDownloadingPdf(true);
+    setPreviewError(null);
+    try {
+      const resp = await fetch('/api/pipeline/preview-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rdlcXml: rdlcText,
+          title: result.reportDefinition.reportName,
+          filename: result.reportDefinition.reportName,
+          sampleFields: result.dummyJson,
+        }),
+      });
+      if (!resp.ok) {
+        const errData = await readJsonSafe(resp);
+        throw new Error(String(errData.error ?? 'Failed to render RDLC to PDF'));
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${result.reportDefinition.reportName}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDownloadingPdf(false);
+    }
+  };
+
+  const handleTabSelect = (id: ArtifactTab) => {
+    setActiveTab(id);
+    if (id === 'preview') {
+      void loadVisualPreview();
+    }
   };
 
   const handleRevalidate = async () => {
@@ -54,8 +177,10 @@ export function ArtifactsPanel({ result }: ArtifactsPanelProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rdlcXml: rdlcText }),
       });
-      const data = await resp.json();
-      if (resp.ok) setValidationState(data);
+      const data = await readJsonSafe(resp);
+      if (resp.ok) setValidationState(data as unknown as FrontendPipelineResult['rdlcValidation']);
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : String(err));
     } finally {
       setValidating(false);
     }
@@ -63,37 +188,43 @@ export function ArtifactsPanel({ result }: ArtifactsPanelProps) {
 
   const handleIntegrate = async () => {
     setIntegrateStatus(null);
-    const resp = await fetch('/api/pipeline/integrate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        relativeOutputDir: outputSubdir,
-        reportName: result.reportDefinition.reportName,
-        force: forceOverwrite,
-        rdlcXml: rdlcText,
-        vbCode: result.vbCode,
-        dummyJson: JSON.stringify(result.dummyJson, null, 2),
-        reportDefinitionJson: JSON.stringify(result.reportDefinition, null, 2),
-      }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      setIntegrateStatus({ ok: false, message: data.error ?? 'Project write blocked' });
-    } else {
-      setIntegrateStatus({
-        ok: true,
-        message: `Written ${data.writtenFiles.length} file(s) to ${data.targetDirectory}`,
+    try {
+      const resp = await fetch('/api/pipeline/integrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          relativeOutputDir: outputSubdir,
+          reportName: result.reportDefinition.reportName,
+          force: forceOverwrite,
+          rdlcXml: rdlcText,
+          vbCode: result.vbCode,
+          dummyJson: JSON.stringify(result.dummyJson, null, 2),
+          reportDefinitionJson: JSON.stringify(result.reportDefinition, null, 2),
+        }),
       });
+      const data = await readJsonSafe(resp);
+      if (!resp.ok) {
+        setIntegrateStatus({ ok: false, message: String(data.error ?? 'Project write blocked') });
+      } else {
+        const written = Array.isArray(data.writtenFiles) ? data.writtenFiles.length : 0;
+        setIntegrateStatus({
+          ok: true,
+          message: `Written ${written} file(s) to ${String(data.targetDirectory ?? outputSubdir)}`,
+        });
+      }
+    } catch (err) {
+      setIntegrateStatus({ ok: false, message: err instanceof Error ? err.message : String(err) });
     }
   };
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-4">
-        <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-md">
+        <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-100 rounded-md">
           {(
             [
               ['rdlc', `${result.reportDefinition.reportName}.rdlc`],
+              ['preview', 'Visual Preview'],
               ['vb', `${result.reportDefinition.reportName}.vb`],
               ['dummy', 'dummy.json'],
               ['definition', 'report-definition.json'],
@@ -101,7 +232,7 @@ export function ArtifactsPanel({ result }: ArtifactsPanelProps) {
           ).map(([id, label]) => (
             <button
               key={id}
-              onClick={() => setActiveTab(id)}
+              onClick={() => handleTabSelect(id)}
               className={`px-3 py-1.5 text-xs font-medium rounded whitespace-nowrap shrink-0 ${
                 activeTab === id ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
               }`}
@@ -111,7 +242,7 @@ export function ArtifactsPanel({ result }: ArtifactsPanelProps) {
           ))}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2">
           {activeTab === 'rdlc' && (
             <button
               onClick={handleRevalidate}
@@ -122,9 +253,28 @@ export function ArtifactsPanel({ result }: ArtifactsPanelProps) {
               {validating ? 'Validating...' : 'Validate RDLC (10-Point)'}
             </button>
           )}
+          {activeTab === 'preview' && (
+            <button
+              onClick={() => loadVisualPreview()}
+              disabled={previewLoading}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-slate-300 bg-white text-slate-800 rounded-md hover:bg-slate-50 whitespace-nowrap shrink-0"
+            >
+              <Eye className="w-3.5 h-3.5" />
+              {previewLoading ? 'Rendering...' : 'Refresh Preview'}
+            </button>
+          )}
+          <button
+            onClick={handleDownloadPdf}
+            disabled={downloadingPdf || !rdlcText}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap shrink-0"
+          >
+            <FileDown className="w-3.5 h-3.5" />
+            {downloadingPdf ? 'Rendering PDF...' : 'Download PDF'}
+          </button>
           <button
             onClick={handleDownload}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-900 text-white rounded-md hover:bg-slate-800 whitespace-nowrap shrink-0"
+            disabled={activeTab === 'preview' && !previewData?.html}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-900 text-white rounded-md hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0"
           >
             <Download className="w-3.5 h-3.5" />
             Download {activeFilename}
@@ -165,6 +315,41 @@ export function ArtifactsPanel({ result }: ArtifactsPanelProps) {
           spellCheck={false}
           className="w-full h-[460px] font-mono text-xs bg-slate-950 text-slate-100 p-4 rounded-lg border border-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600"
         />
+      ) : activeTab === 'preview' ? (
+        <div className="space-y-3">
+          {previewError && (
+            <div className="bg-red-50 border border-red-200 rounded-md p-3 text-xs text-red-700 font-mono">
+              {previewError}
+            </div>
+          )}
+          {previewData && (
+            <div className="bg-white border border-slate-200 rounded-lg px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs font-mono text-slate-600">
+              <span>
+                Pages: <strong className="text-slate-900">{previewData.pageCount}</strong> ({previewData.pageWidth} ×{' '}
+                {previewData.pageHeight}) · Tablixes: <strong className="text-slate-900">{previewData.stats.tablixes}</strong> ·
+                Embedded PNGs: <strong className="text-slate-900">{previewData.stats.embeddedImages}</strong> · Params:{' '}
+                <strong className="text-slate-900">{previewData.stats.parameters}</strong>
+              </span>
+              <span className={previewData.collisions.length === 0 ? 'text-emerald-700 font-semibold' : 'text-amber-700 font-semibold'}>
+                {previewData.collisions.length === 0
+                  ? '0 layout collisions'
+                  : `${previewData.collisions.length} overlap warning(s)`}
+              </span>
+            </div>
+          )}
+          {previewLoading ? (
+            <div className="h-[520px] flex items-center justify-center bg-slate-900 text-slate-300 text-xs font-mono rounded-lg border border-slate-800">
+              Rendering coordinate-locked RDLC visual preview...
+            </div>
+          ) : previewData?.html ? (
+            <iframe
+              title="RDLC Visual Render Preview"
+              srcDoc={previewData.html}
+              sandbox=""
+              className="w-full h-[640px] rounded-lg border border-slate-300 bg-slate-900"
+            />
+          ) : null}
+        </div>
       ) : (
         <pre className="w-full h-[460px] overflow-auto font-mono text-xs bg-slate-950 text-slate-100 p-4 rounded-lg border border-slate-800">
           {activeContent}

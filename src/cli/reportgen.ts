@@ -17,6 +17,8 @@ Usage:
   reportgen inspect [--rdlc <file.rdlc>] [--vb <file.vb>] [--excel <file.xlsx>]
   reportgen generate <input.pdf> [--project <dir>] [--output <relDir>] [--existing-rdlc <file>] [--existing-vb <file>] [--excel <file>] [--no-ai] [--dry-run] [--force]
   reportgen preview <outputDir>
+  reportgen render-preview <outputDirOrRdlcFile> [--out <preview.html>] [--stdout]
+  reportgen render-pdf <outputDirOrRdlcFile> [--out <preview.pdf>]
   reportgen validate <outputDirOrRdlcFile>
   reportgen test <outputDir> [--excel <file>] [--json <file>]
   reportgen render <report.rdlc>
@@ -41,7 +43,7 @@ async function main(): Promise<void> {
   const command = args[0];
   const config = loadConfig();
   const isJsonCmd =
-    ['tools', 'inspect', 'preview', 'validate', 'test', 'render', 'compare'].includes(command) ||
+    ['tools', 'inspect', 'preview', 'render-preview', 'render-pdf', 'validate', 'test', 'render', 'compare'].includes(command) ||
     args.includes('--stdout') ||
     args.includes('--dry-run');
   const services = createReportGenServices(config, !isJsonCmd);
@@ -110,6 +112,7 @@ async function main(): Promise<void> {
     const validation = rdlcName
       ? new RdlcValidator(services.logger).validate(fs.readFileSync(path.join(dir, rdlcName), 'utf-8'))
       : undefined;
+    const previewHtmlFile = files.find((f) => f === 'preview.html');
     console.log(
       JSON.stringify(
         wrapUntrustedData('mixed_project', dir, {
@@ -119,6 +122,7 @@ async function main(): Promise<void> {
           tablixCount: definition?.tablixRegions?.length,
           rdlcFile: rdlcName,
           vbFile: vbName,
+          previewHtmlFile,
           validation,
         }),
         null,
@@ -298,6 +302,91 @@ async function main(): Promise<void> {
     const status = await services.renderer.renderToPdf(rdlcPath);
     console.log(JSON.stringify(status, null, 2));
     if (!status.executed) process.exit(2);
+    return;
+  }
+
+  if (command === 'render-preview') {
+    const target = args[1];
+    if (!target || !fs.existsSync(target)) {
+      throw new Error(`Target not found: ${target ?? '(missing)'}`);
+    }
+    const isDir = fs.statSync(target).isDirectory();
+    const rdlcName = isDir ? fs.readdirSync(target).find((f) => f.endsWith('.rdlc')) : path.basename(target);
+    if (!rdlcName) {
+      throw new Error(`No .rdlc file found in ${target}`);
+    }
+    const rdlcPath = isDir ? path.join(target, rdlcName) : target;
+    const xml = fs.readFileSync(rdlcPath, 'utf-8');
+    const preview = services.rdlcPreviewRenderer.renderHtml(xml, {
+      title: `${path.basename(rdlcPath, '.rdlc')} — RDLC Visual Render Preview`,
+    });
+
+    if (args.includes('--stdout')) {
+      process.stdout.write(preview.html);
+      return;
+    }
+
+    const outPath = getFlagValue(args, '--out') ?? path.join(path.dirname(rdlcPath), 'preview.html');
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, preview.html, 'utf-8');
+    console.log(
+      JSON.stringify(
+        {
+          rdlcPath: path.resolve(rdlcPath),
+          previewPath: path.resolve(outPath),
+          pageCount: preview.pageCount,
+          pageSize: `${preview.pageWidth} × ${preview.pageHeight}`,
+          stats: preview.stats,
+          collisionCount: preview.collisions.length,
+          collisions: preview.collisions,
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  if (command === 'render-pdf') {
+    const target = args[1];
+    if (!target || !fs.existsSync(target)) {
+      throw new Error(`Target not found: ${target ?? '(missing)'}`);
+    }
+    const isDir = fs.statSync(target).isDirectory();
+    const rdlcName = isDir ? fs.readdirSync(target).find((f) => f.endsWith('.rdlc')) : path.basename(target);
+    if (!rdlcName) {
+      throw new Error(`No .rdlc file found in ${target}`);
+    }
+    const rdlcPath = isDir ? path.join(target, rdlcName) : target;
+    const xml = fs.readFileSync(rdlcPath, 'utf-8');
+    const dummyPath = path.join(path.dirname(rdlcPath), 'dummy-data.json');
+    const dummyAltPath = path.join(path.dirname(rdlcPath), 'dummy.json');
+    let sampleFields: Record<string, unknown> | undefined;
+    if (fs.existsSync(dummyPath)) {
+      sampleFields = JSON.parse(fs.readFileSync(dummyPath, 'utf-8'));
+    } else if (fs.existsSync(dummyAltPath)) {
+      sampleFields = JSON.parse(fs.readFileSync(dummyAltPath, 'utf-8'));
+    }
+    const pdfBytes = await services.rdlcPreviewRenderer.renderPdf(xml, {
+      title: path.basename(rdlcPath, '.rdlc'),
+      sampleFields,
+    });
+    const outPath =
+      getFlagValue(args, '--out') ??
+      path.join(path.dirname(rdlcPath), `${path.basename(rdlcPath, '.rdlc')}.pdf`);
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, Buffer.from(pdfBytes));
+    console.log(
+      JSON.stringify(
+        {
+          rdlcPath: path.resolve(rdlcPath),
+          pdfPath: path.resolve(outPath),
+          bytes: pdfBytes.byteLength,
+        },
+        null,
+        2
+      )
+    );
     return;
   }
 

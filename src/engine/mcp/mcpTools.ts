@@ -6,6 +6,7 @@ import { PdfAnalyzer } from '../pdf/pdfAnalyzer.ts';
 import { ProjectInspector } from '../project/projectInspector.ts';
 import { ProjectIntegrator } from '../project/projectIntegrator.ts';
 import { RdlcGenerator } from '../rdlc/rdlcGenerator.ts';
+import { RdlcVisualPreviewRenderer } from '../rdlc/rdlcPreviewRenderer.ts';
 import { TablixBuilder } from '../rdlc/tablixBuilder.ts';
 import { SkillManager } from '../skills/skillManager.ts';
 import { LogicTestRunner } from '../testing/logicTestRunner.ts';
@@ -189,6 +190,26 @@ export const MCP_TOOL_CATALOG: McpToolDescriptor[] = [
     command: 'npm run reportgen -- render <report.rdlc>',
   },
   {
+    name: 'preview_rdlc_visual',
+    description: 'Programmatically parse RDLC XML into a 1:1 coordinate-locked HTML visual preview.',
+    readOnly: true,
+    category: 'VALIDATION',
+    riskLevel: 'low',
+    approvalRequired: false,
+    handlerName: 'RdlcVisualPreviewRenderer.renderHtml',
+    command: 'npm run reportgen -- render-preview <rdlcOrDir>',
+  },
+  {
+    name: 'render_rdlc_pdf',
+    description: 'Deterministically render RDLC XML coordinates, styles, tables, and embedded PNGs into a downloadable binary PDF.',
+    readOnly: true,
+    category: 'VALIDATION',
+    riskLevel: 'low',
+    approvalRequired: false,
+    handlerName: 'RdlcVisualPreviewRenderer.renderPdf',
+    command: 'npm run reportgen -- render-pdf <rdlcOrDir> --out <preview.pdf>',
+  },
+  {
     name: 'compare_pdf',
     description: 'Run Ghostscript + pixelmatch visual regression between two PDFs.',
     readOnly: true,
@@ -316,6 +337,7 @@ export interface ReportGenServices {
   projectIntegrator: ProjectIntegrator;
   tablixBuilder: TablixBuilder;
   rdlcGenerator: RdlcGenerator;
+  rdlcPreviewRenderer: RdlcVisualPreviewRenderer;
   vbGenerator: VbGenerator;
   excelOracle: ExcelOracleReader;
   logicTestRunner: LogicTestRunner;
@@ -335,6 +357,7 @@ export function createReportGenServices(config: ReportGenConfig, echoLogs = true
     projectIntegrator: new ProjectIntegrator(logger),
     tablixBuilder: new TablixBuilder(logger),
     rdlcGenerator: new RdlcGenerator(logger),
+    rdlcPreviewRenderer: new RdlcVisualPreviewRenderer(logger),
     vbGenerator: new VbGenerator(logger),
     excelOracle: new ExcelOracleReader(logger),
     logicTestRunner: new LogicTestRunner(logger),

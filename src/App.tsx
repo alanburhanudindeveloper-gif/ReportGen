@@ -4,6 +4,8 @@ import {
   Code2,
   Cpu,
   Download,
+  Eye,
+  FileDown,
   FileSpreadsheet,
   FileText,
   Layers,
@@ -13,7 +15,7 @@ import {
   Wrench,
   XCircle,
 } from 'lucide-react';
-import { ArtifactsPanel } from './ui/ArtifactsPanel.tsx';
+import { ArtifactsPanel, ArtifactTab } from './ui/ArtifactsPanel.tsx';
 import { LayoutInspector } from './ui/LayoutInspector.tsx';
 import { ProposalWorkspace } from './ui/ProposalWorkspace.tsx';
 import { FrontendPipelineResult } from './ui/types.ts';
@@ -61,19 +63,89 @@ export default function App() {
     status: string;
   } | null>(null);
 
+  const [stagedOutputs, setStagedOutputs] = useState<
+    Array<{ folder: string; rdlcFile: string; rdlcBytes: number; hasPreviewHtml: boolean }>
+  >([]);
+  const [selectedStagedPreview, setSelectedStagedPreview] = useState<{
+    folder: string;
+    rdlcFile: string;
+    rdlcBytes: number;
+    validation: { valid: boolean; checkedRules: number; errors: Array<{ ruleId: string; message: string }>; warnings: Array<{ ruleId: string; message: string }> };
+    preview: {
+      html: string;
+      pageCount: number;
+      pageWidth: string;
+      pageHeight: string;
+      stats: { tablixes: number; mergedCells: number; textboxes: number; embeddedImages: number; parameters: number };
+      collisions: Array<{ page: number; container: string; itemA: string; itemB: string; overlapCm: string }>;
+    };
+  } | null>(null);
+  const [loadingStagedPreview, setLoadingStagedPreview] = useState(false);
+  const [downloadingStagedPdf, setDownloadingStagedPdf] = useState(false);
+  const [artifactsInitialTab, setArtifactsInitialTab] = useState<ArtifactTab>('rdlc');
+
   useEffect(() => {
     Promise.all([
       fetch('/api/skills').then((r) => r.json()).catch(() => ({ skills: [] })),
       fetch('/api/mcp/tools').then((r) => r.json()).catch(() => ({ tools: [] })),
       fetch('/api/config').then((r) => r.json()).catch(() => null),
       fetch('/api/health').then((r) => r.json()).catch(() => null),
-    ]).then(([s, m, c, h]) => {
+      fetch('/api/outputs').then((r) => r.json()).catch(() => ({ outputs: [] })),
+    ]).then(([s, m, c, h, o]) => {
       setSkills(s.skills ?? []);
       setMcpTools(m.tools ?? []);
       setConfigData(c);
       setLlmStatus(h?.llm ?? null);
+      setStagedOutputs(o?.outputs ?? []);
     });
   }, []);
+
+  const parseJsonSafe = async (resp: Response) => {
+    const raw = await resp.text();
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new Error(raw.slice(0, 200) || `HTTP ${resp.status}`);
+    }
+  };
+
+  const loadStagedOutputPreview = async (folder: string) => {
+    setLoadingStagedPreview(true);
+    setError(null);
+    try {
+      const resp = await fetch(`/api/outputs/${encodeURIComponent(folder)}/preview`);
+      const data = await parseJsonSafe(resp);
+      if (!resp.ok) throw new Error(data.error ?? 'Failed to load staged RDLC preview');
+      setSelectedStagedPreview(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoadingStagedPreview(false);
+    }
+  };
+
+  const downloadStagedPdf = async (folder: string, rdlcFile: string) => {
+    setDownloadingStagedPdf(true);
+    setError(null);
+    try {
+      const resp = await fetch(`/api/outputs/${encodeURIComponent(folder)}/pdf`);
+      if (!resp.ok) {
+        const data = await parseJsonSafe(resp);
+        throw new Error(data.error ?? 'Failed to render staged RDLC to PDF');
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${rdlcFile.replace(/\.rdlc$/i, '')}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDownloadingStagedPdf(false);
+    }
+  };
 
   const executePipeline = async (useFixture: boolean) => {
     if (!useFixture && !pdfFile) {
@@ -92,7 +164,7 @@ export default function App() {
       if (excelFile) form.append('excel', excelFile);
 
       const resp = await fetch('/api/pipeline/run', { method: 'POST', body: form });
-      const data = await resp.json();
+      const data = await parseJsonSafe(resp);
       if (!resp.ok) {
         throw new Error(data.error ?? 'Pipeline execution failed');
       }
@@ -515,7 +587,19 @@ export default function App() {
                         Inspect Tablix Grid →
                       </button>
                       <button
-                        onClick={() => setSection('artifacts')}
+                        onClick={() => {
+                          setArtifactsInitialTab('preview');
+                          setSection('artifacts');
+                        }}
+                        className="text-xs font-medium text-blue-700 hover:underline whitespace-nowrap"
+                      >
+                        Visual Preview &amp; PDF →
+                      </button>
+                      <button
+                        onClick={() => {
+                          setArtifactsInitialTab('rdlc');
+                          setSection('artifacts');
+                        }}
                         className="text-xs font-medium text-blue-700 hover:underline whitespace-nowrap"
                       >
                         View RDLC &amp; VB →
@@ -541,6 +625,84 @@ export default function App() {
                       ))}
                     </div>
                   </div>
+                </div>
+              )}
+              {/* Staged Output RDLC Previews */}
+              {stagedOutputs.length > 0 && (
+                <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-sm font-semibold text-slate-900">Staged Output RDLC Visual Previews</h2>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Inspect generated RDLC packages from <span className="font-mono">output/</span> with 10-point validation and programmatic 1:1 coordinate rendering.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {stagedOutputs.map((item) => (
+                        <button
+                          key={item.folder}
+                          onClick={() => loadStagedOutputPreview(item.folder)}
+                          disabled={loadingStagedPreview}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-slate-300 bg-white text-slate-800 rounded-md hover:bg-slate-50 disabled:opacity-50"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          {loadingStagedPreview && selectedStagedPreview?.folder === item.folder
+                            ? 'Rendering...'
+                            : `${item.folder} (${Math.round(item.rdlcBytes / 1024)} KB)`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {selectedStagedPreview && (
+                    <div className="space-y-3 border-t border-slate-200 pt-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
+                        <div className="font-mono text-slate-700">
+                          <span className="font-semibold text-slate-900">{selectedStagedPreview.rdlcFile}</span> ·{' '}
+                          <span className={selectedStagedPreview.validation.valid ? 'text-emerald-700 font-semibold' : 'text-red-700 font-semibold'}>
+                            RDLC {selectedStagedPreview.validation.valid ? 'PASS' : 'FAIL'}
+                          </span>{' '}
+                          · {selectedStagedPreview.preview.pageCount} pages ({selectedStagedPreview.preview.pageWidth} ×{' '}
+                          {selectedStagedPreview.preview.pageHeight}) · {selectedStagedPreview.preview.stats.tablixes} Tablixes (
+                          {selectedStagedPreview.preview.stats.mergedCells} merged) ·{' '}
+                          {selectedStagedPreview.preview.stats.embeddedImages} Embedded PNGs ·{' '}
+                          {selectedStagedPreview.preview.stats.parameters} Parameters ·{' '}
+                          {selectedStagedPreview.preview.collisions.length} overlaps
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            onClick={() => downloadStagedPdf(selectedStagedPreview.folder, selectedStagedPreview.rdlcFile)}
+                            disabled={downloadingStagedPdf}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+                          >
+                            <FileDown className="w-3.5 h-3.5" />
+                            {downloadingStagedPdf ? 'Rendering PDF...' : 'Download PDF'}
+                          </button>
+                          <button
+                            onClick={() => {
+                              const blob = new Blob([selectedStagedPreview.preview.html], { type: 'text/html;charset=utf-8' });
+                              const url = URL.createObjectURL(blob);
+                              const a = document.createElement('a');
+                              a.href = url;
+                              a.download = `${selectedStagedPreview.folder}-preview.html`;
+                              a.click();
+                              URL.revokeObjectURL(url);
+                            }}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-900 text-white rounded-md hover:bg-slate-800"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            Download preview.html
+                          </button>
+                        </div>
+                      </div>
+                      <iframe
+                        title={`${selectedStagedPreview.folder} RDLC Preview`}
+                        srcDoc={selectedStagedPreview.preview.html}
+                        sandbox=""
+                        className="w-full h-[640px] rounded-lg border border-slate-300 bg-slate-900"
+                      />
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -629,7 +791,7 @@ export default function App() {
             </div>
           )}
 
-          {section === 'artifacts' && result && <ArtifactsPanel result={result} />}
+          {section === 'artifacts' && result && <ArtifactsPanel result={result} initialTab={artifactsInitialTab} />}
 
           {section === 'verification' && result && (
             <VerificationPanel

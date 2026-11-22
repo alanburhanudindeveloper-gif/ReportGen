@@ -285,6 +285,50 @@ export interface CalculationRuleDef {
   vbImplementation: string;
 }
 
+export interface VisualRectItem {
+  kind: 'Rectangle';
+  name: string;
+  leftIn: number;
+  topIn: number;
+  widthIn: number;
+  heightIn: number;
+  backgroundColor?: string;
+  borderColor?: string;
+  borderWidthPt?: number;
+}
+
+export interface VisualImageItem {
+  kind: 'Image';
+  name: string;
+  embeddedImageName: string;
+  leftIn: number;
+  topIn: number;
+  widthIn: number;
+  heightIn: number;
+  sizing: 'FitProportional' | 'Fit' | 'Clip';
+}
+
+export interface VisualTextboxItem {
+  kind: 'Textbox';
+  name: string;
+  leftIn: number;
+  topIn: number;
+  widthIn: number;
+  heightIn: number;
+  text: string;
+  style: RegionStyle;
+}
+
+export interface VisualPageLayer {
+  pageNumber: number;
+  widthIn: number;
+  heightIn: number;
+  rectangles: VisualRectItem[];
+  images: VisualImageItem[];
+  textboxes: VisualTextboxItem[];
+  tablixes: TablixRegion[];
+}
+
 export interface ReportDefinition {
   reportName: string;
   dataSourceName: string;
@@ -303,6 +347,7 @@ export interface ReportDefinition {
   tablixRegions: TablixRegion[];
   embeddedImages: Array<{ name: string; mimeType: string; base64Data: string }>;
   existingPatternUsed?: string;
+  visualPages?: VisualPageLayer[];
 }
 
 export interface AiAmbiguousRegionSlice {

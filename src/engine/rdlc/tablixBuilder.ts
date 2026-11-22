@@ -3,14 +3,21 @@ import {
   CalculationRuleDef,
   ExistingProjectPattern,
   IntermediateLayoutModel,
+  LayoutPage,
   LayoutRegion,
+  RegionStyle,
   ReportDefinition,
   ReportFieldDef,
   ReportParameterDef,
+  ReconstructedBand,
   StructuredLogger,
   TablixCell,
   TablixRegion,
   TablixRow,
+  VisualImageItem,
+  VisualPageLayer,
+  VisualRectItem,
+  VisualTextboxItem,
 } from '../core/types.ts';
 
 function sanitizeIdentifier(raw: string, fallback: string): string {
@@ -22,6 +29,14 @@ function sanitizeIdentifier(raw: string, fallback: string): string {
     .join('');
   if (!cleaned) return fallback;
   return /^[0-9]/.test(cleaned) ? `F_${cleaned}` : cleaned;
+}
+
+function clamp(val: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, val));
+}
+
+function roundIn(val: number): number {
+  return Math.round(val * 1000) / 1000;
 }
 
 export class TablixBuilder {
@@ -48,8 +63,8 @@ export class TablixBuilder {
     const parameterMap = new Map<string, ReportParameterDef>();
     const embeddedImages: Array<{ name: string; mimeType: string; base64Data: string }> = [];
     const seenImageNames = new Set<string>();
+    const base64ToImageName = new Map<string, string>();
 
-    // Seed fields from existing RDLC if inspected
     for (const existingField of existingPattern?.fields ?? []) {
       fieldMap.set(existingField, {
         name: existingField,
@@ -70,9 +85,50 @@ export class TablixBuilder {
       });
     }
 
+    // Use zero margins when any graphic/vector/text sits in the outer bleed zone so banners span edge-to-edge
+    const isFullBleed = layout.pages.some((p) =>
+      p.regions.some(
+        (r) =>
+          r.x < 0.22 ||
+          r.x + r.width > p.width - 0.22 ||
+          r.y < 0.22 ||
+          r.y + r.height > p.height - 0.22
+      )
+    );
+    const marginsIn = isFullBleed
+      ? { top: 0, right: 0, bottom: 0, left: 0 }
+      : { top: 0.25, right: 0.25, bottom: 0.25, left: 0.25 };
+
+    const printableWidthIn = Math.max(
+      1.5,
+      layout.document.pageWidth - marginsIn.left - marginsIn.right
+    );
+    const printableHeightIn = Math.max(
+      2.0,
+      layout.document.pageHeight - marginsIn.top - marginsIn.bottom
+    );
+
     const tablixRegions: TablixRegion[] = [];
+    const visualPages: VisualPageLayer[] = [];
     let nameCounter = 1;
     const nextUniqueName = (prefix: string): string => `${prefix}_${nameCounter++}`;
+
+    const registerEmbeddedImage = (base64Data: string, preferredName: string): string => {
+      const existing = base64ToImageName.get(base64Data);
+      if (existing) return existing;
+      let imgName = sanitizeIdentifier(preferredName, `Graphic_${nameCounter}`);
+      while (seenImageNames.has(imgName)) {
+        imgName = `${sanitizeIdentifier(preferredName, 'Graphic')}_${nameCounter++}`;
+      }
+      seenImageNames.add(imgName);
+      base64ToImageName.set(base64Data, imgName);
+      embeddedImages.push({
+        name: imgName,
+        mimeType: 'image/png',
+        base64Data,
+      });
+      return imgName;
+    };
 
     for (const page of layout.pages) {
       const regionById = new Map<string, LayoutRegion>();
@@ -91,223 +147,256 @@ export class TablixBuilder {
         regionById.set(updated.id, updated);
       }
 
-      let currentPageTopOffset = 0;
+      const allRegions = Array.from(regionById.values());
+      const vectorRects = allRegions.filter((r) => r.type === 'vector_rect');
 
-      for (const band of page.bands) {
-        const numCols = band.columnWidths.length;
-        const numRows = band.rowHeights.length;
-        if (numCols === 0 || numRows === 0) continue;
+      // 1. Identify bands that genuinely represent structured tables (<Tablix>)
+      const tableBands = page.bands.filter((band) =>
+        this.isGenuineTableBand(band, vectorRects)
+      );
 
-        const cellLookup = new Map(band.cells.map((c) => [`${c.row}:${c.col}`, c]));
-        const skippedCoords = new Set<string>();
-        const rows: TablixRow[] = [];
+      const pageTablixes: TablixRegion[] = [];
+      const tablixBounds: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
 
-        // Detect column headers on row 0 if repeating detail
-        const columnHeaderNames: string[] = [];
-        if (band.isRepeatingDetail) {
-          for (let c = 0; c < numCols; c++) {
-            const headerCell = cellLookup.get(`0:${c}`);
-            const reg = headerCell?.primaryRegionId ? regionById.get(headerCell.primaryRegionId) : undefined;
-            const colField = sanitizeIdentifier(reg?.text ?? `Column${c + 1}`, `Column${c + 1}`);
-            columnHeaderNames.push(colField);
-          }
-        }
-
-        for (let rIdx = 0; rIdx < numRows; rIdx++) {
-          const isDetailRow = band.isRepeatingDetail && rIdx === 1;
-          // For repeating detail tables, emit header row (0) + single template detail row (1)
-          if (band.isRepeatingDetail && rIdx > 1) {
-            continue;
-          }
-
-          const rowCells: TablixCell[] = [];
-          for (let cIdx = 0; cIdx < numCols; cIdx++) {
-            const key = `${rIdx}:${cIdx}`;
-            if (skippedCoords.has(key)) {
-              rowCells.push({
-                colIndex: cIdx,
-                rowIndex: rIdx,
-                colSpan: 1,
-                rowSpan: 1,
-                skipBecauseMerged: true,
-                content: { kind: 'Empty', name: nextUniqueName('Empty') },
-              });
-              continue;
-            }
-
-            const assigned = cellLookup.get(key);
-            const colSpan = Math.min(numCols - cIdx, Math.max(1, assigned?.colSpan ?? 1));
-            const rowSpan = band.isRepeatingDetail
-              ? 1
-              : Math.min(numRows - rIdx, Math.max(1, assigned?.rowSpan ?? 1));
-
-            for (let rr = rIdx; rr < rIdx + rowSpan; rr++) {
-              for (let cc = cIdx; cc < cIdx + colSpan; cc++) {
-                if (rr !== rIdx || cc !== cIdx) {
-                  skippedCoords.add(`${rr}:${cc}`);
-                }
-              }
-            }
-
-            const region = assigned?.primaryRegionId
-              ? regionById.get(assigned.primaryRegionId)
-              : undefined;
-
-            if (region && (region.type === 'image' || region.preferImageFallback) && region.imageAssetBase64) {
-              const imgName = sanitizeIdentifier(
-                region.imageAssetName ?? `Graphic_P${page.pageNumber}_${nameCounter}`,
-                `Graphic_${nameCounter}`
-              );
-              if (!seenImageNames.has(imgName)) {
-                seenImageNames.add(imgName);
-                embeddedImages.push({
-                  name: imgName,
-                  mimeType: 'image/png',
-                  base64Data: region.imageAssetBase64,
-                });
-              }
-              rowCells.push({
-                colIndex: cIdx,
-                rowIndex: rIdx,
-                colSpan,
-                rowSpan,
-                skipBecauseMerged: false,
-                content: {
-                  kind: 'Image',
-                  name: nextUniqueName('Img'),
-                  mimeType: 'image/png',
-                  base64Data: region.imageAssetBase64,
-                  sizing: 'FitProportional',
-                },
-              });
-              continue;
-            }
-
-            if (region && region.type === 'text' && region.text) {
-              let value = region.text;
-              let isExpression = false;
-
-              if (isDetailRow) {
-                const fieldName = columnHeaderNames[cIdx] ?? sanitizeIdentifier(`Col${cIdx + 1}`, `Col${cIdx + 1}`);
-                const isNumeric = /^[\$\€\£]?\s*-?\d/.test(region.text.trim());
-                const isCalc = /total|amount|net|subtotal/i.test(fieldName);
-                if (!fieldMap.has(fieldName)) {
-                  fieldMap.set(fieldName, {
-                    name: fieldName,
-                    dataType: isNumeric ? 'System.Decimal' : 'System.String',
-                    sampleValue: isNumeric
-                      ? Number(region.text.replace(/[^0-9.-]/g, '')) || 0
-                      : region.text,
-                    isCalculated: isCalc,
-                  });
-                }
-                if (isCalc && fieldMap.has('Qty') && fieldMap.has('Price')) {
-                  value = '=Code.CalculateLineTotal(Fields!Qty.Value, Fields!Price.Value, 0)';
-                } else {
-                  value = `=Fields!${fieldName}.Value`;
-                }
-                isExpression = true;
-              } else if (
-                region.semanticRole === 'fieldValue' ||
-                region.semanticRole === 'calculationField'
-              ) {
-                const fieldName = sanitizeIdentifier(
-                  region.linkedField ?? `Field_${page.pageNumber}_${nameCounter}`,
-                  `Field_${nameCounter}`
-                );
-                const isNumeric = /^[\$\€\£]?\s*-?\d/.test(region.text.trim());
-                if (!fieldMap.has(fieldName)) {
-                  fieldMap.set(fieldName, {
-                    name: fieldName,
-                    dataType: isNumeric ? 'System.Decimal' : 'System.String',
-                    sampleValue: isNumeric
-                      ? Number(region.text.replace(/[^0-9.-]/g, '')) || 0
-                      : region.text,
-                    isCalculated: region.semanticRole === 'calculationField',
-                  });
-                }
-                value =
-                  region.semanticRole === 'calculationField' && fieldMap.has('Qty') && fieldMap.has('Price')
-                    ? '=Code.CalculateNetTotal(Fields!Qty.Value, Fields!Price.Value, 0)'
-                    : `=Fields!${fieldName}.Value`;
-                isExpression = true;
-              }
-
-              rowCells.push({
-                colIndex: cIdx,
-                rowIndex: rIdx,
-                colSpan,
-                rowSpan,
-                skipBecauseMerged: false,
-                content: {
-                  kind: 'Textbox',
-                  name: nextUniqueName('Txt'),
-                  value,
-                  isExpression,
-                  style: region.style,
-                  canGrow: true,
-                },
-              });
-              continue;
-            }
-
-            // Background rectangle or spacer cell
-            rowCells.push({
-              colIndex: cIdx,
-              rowIndex: rIdx,
-              colSpan,
-              rowSpan,
-              skipBecauseMerged: false,
-              content: {
-                kind: 'Textbox',
-                name: nextUniqueName('Cell'),
-                value: '',
-                isExpression: false,
-                style: region?.style ?? {
-                  fontFamily: 'Segoe UI',
-                  fontSizePt: 9,
-                  bold: false,
-                  italic: false,
-                  color: '#0F172A',
-                  textAlign: 'Left',
-                  verticalAlign: 'Middle',
-                  paddingPt: { top: 1, right: 2, bottom: 1, left: 2 },
-                },
-                canGrow: true,
-              },
-            });
-          }
-
-          rows.push({
-            heightIn: Math.max(0.18, band.rowHeights[rIdx] ?? 0.25),
-            isDetailRow,
-            cells: rowCells,
-          });
-        }
-
-        const totalTablixHeight = rows.reduce((s, r) => s + r.heightIn, 0);
-        const topIn = Math.round(((page.pageNumber - 1) * page.height + band.y + currentPageTopOffset) * 1000) / 1000;
-        currentPageTopOffset += 0;
-
-        tablixRegions.push({
-          id: band.id,
-          name: sanitizeIdentifier(band.name, `Tablix_${nameCounter}`),
-          pageNumber: page.pageNumber,
-          bandKind: band.bandKind,
-          topIn: Math.max(0.1, band.y + (page.pageNumber - 1) * page.height),
-          leftIn: Math.max(0.1, band.x),
-          widthIn: Math.max(0.5, band.columnWidths.reduce((s, w) => s + w, 0)),
-          heightIn: Math.max(0.25, totalTablixHeight),
+      for (const band of tableBands) {
+        const tablix = this.buildTablixForBand(
+          band,
+          page,
+          regionById,
+          vectorRects,
+          fieldMap,
           dataSetName,
-          isRepeatingDetail: band.isRepeatingDetail,
-          columnWidthsIn: band.columnWidths.map((w) => Math.max(0.15, w)),
-          rows,
+          marginsIn,
+          printableWidthIn,
+          printableHeightIn,
+          existingPattern,
+          nextUniqueName,
+          registerEmbeddedImage
+        );
+        if (!tablix) continue;
+
+        const pageRelTop = roundIn(
+          clamp(tablix.topIn - (page.pageNumber - 1) * page.height, 0, printableHeightIn - 0.2)
+        );
+        const clampedTablix: TablixRegion = {
+          ...tablix,
+          topIn: pageRelTop,
+        };
+        pageTablixes.push(clampedTablix);
+        tablixRegions.push(tablix);
+        tablixBounds.push({
+          x1: clampedTablix.leftIn,
+          y1: clampedTablix.topIn,
+          x2: clampedTablix.leftIn + clampedTablix.widthIn,
+          y2: clampedTablix.topIn + clampedTablix.heightIn,
         });
-        void topIn;
       }
+
+      const isCoveredByTablix = (relX: number, relY: number, w: number, h: number): boolean => {
+        const cx = relX + w / 2;
+        const cy = relY + h / 2;
+        return tablixBounds.some(
+          (b) =>
+            cx >= b.x1 - 0.02 &&
+            cx <= b.x2 + 0.02 &&
+            cy >= b.y1 - 0.02 &&
+            cy <= b.y2 + 0.02
+        );
+      };
+
+      // 2. Collect non-table visual Rectangles & Lines (background fills, cards, borders, hairlines)
+      const visualRectangles: VisualRectItem[] = [];
+      for (const r of allRegions) {
+        if (r.type !== 'vector_rect' && r.type !== 'vector_line') continue;
+
+        const x1 = clamp(r.x - marginsIn.left, 0, printableWidthIn);
+        const y1 = clamp(r.y - marginsIn.top, 0, printableHeightIn);
+        const x2 = clamp(r.x + r.width - marginsIn.left, 0, printableWidthIn);
+        const y2 = clamp(r.y + r.height - marginsIn.top, 0, printableHeightIn);
+        let w = roundIn(x2 - x1);
+        let h = roundIn(y2 - y1);
+
+        if (r.type === 'vector_line') {
+          const horizontal = r.width >= r.height;
+          if (horizontal) {
+            if (w < 0.05) continue;
+            h = Math.max(0.015, h);
+          } else {
+            if (h < 0.05) continue;
+            w = Math.max(0.015, w);
+          }
+          if (isCoveredByTablix(x1, y1, w, h)) continue;
+          const lineColor = r.style.borderColor ?? r.style.backgroundColor ?? '#CBD5E1';
+          visualRectangles.push({
+            kind: 'Rectangle',
+            name: nextUniqueName('LineRect'),
+            leftIn: roundIn(x1),
+            topIn: roundIn(y1),
+            widthIn: roundIn(Math.min(w, printableWidthIn - x1)),
+            heightIn: roundIn(Math.min(h, printableHeightIn - y1)),
+            backgroundColor: lineColor,
+          });
+          continue;
+        }
+
+        if (w <= 0.01 || h <= 0.01) continue;
+        const bg = r.style.backgroundColor;
+        const bc = r.style.borderColor;
+        if (!bg && !bc) continue;
+
+        // Skip full-page white backdrop
+        if (
+          w >= printableWidthIn - 0.12 &&
+          h >= printableHeightIn - 0.12 &&
+          (!bg || bg.toUpperCase() === '#FFFFFF') &&
+          !bc
+        ) {
+          continue;
+        }
+
+        if (isCoveredByTablix(x1, y1, w, h)) continue;
+
+        visualRectangles.push({
+          kind: 'Rectangle',
+          name: nextUniqueName('Rect'),
+          leftIn: roundIn(x1),
+          topIn: roundIn(y1),
+          widthIn: w,
+          heightIn: h,
+          backgroundColor: bg,
+          borderColor: bc,
+          borderWidthPt: bc ? Math.max(0.5, r.style.borderWidthPt ?? 0.75) : undefined,
+        });
+      }
+
+      // Preserve exact PDF stream painter order for filled/card Rect items, then draw hairline LineRect dividers on top
+      const shapeRects = visualRectangles.filter((v) => !v.name.startsWith('LineRect_'));
+      const lineRects = visualRectangles.filter((v) => v.name.startsWith('LineRect_'));
+      visualRectangles.splice(0, visualRectangles.length, ...shapeRects, ...lineRects);
+
+      // Deduplicate identical stacked rects at same coordinates
+      const dedupedRects: VisualRectItem[] = [];
+      for (const rect of visualRectangles) {
+        const dupIdx = dedupedRects.findIndex(
+          (prev) =>
+            Math.abs(prev.leftIn - rect.leftIn) <= 0.015 &&
+            Math.abs(prev.topIn - rect.topIn) <= 0.015 &&
+            Math.abs(prev.widthIn - rect.widthIn) <= 0.02 &&
+            Math.abs(prev.heightIn - rect.heightIn) <= 0.02
+        );
+        if (dupIdx >= 0) {
+          dedupedRects[dupIdx] = {
+            ...dedupedRects[dupIdx],
+            backgroundColor: rect.backgroundColor ?? dedupedRects[dupIdx].backgroundColor,
+            borderColor: rect.borderColor ?? dedupedRects[dupIdx].borderColor,
+            borderWidthPt: rect.borderWidthPt ?? dedupedRects[dupIdx].borderWidthPt,
+          };
+        } else {
+          dedupedRects.push(rect);
+        }
+      }
+
+      // 3. Collect freeform Images & Vector Clusters (logos, icons, illustrations)
+      const visualImages: VisualImageItem[] = [];
+      for (const r of allRegions) {
+        if ((r.type !== 'image' && r.type !== 'vector_complex') || !r.imageAssetBase64) continue;
+        const x1 = clamp(r.x - marginsIn.left, 0, printableWidthIn - 0.05);
+        const y1 = clamp(r.y - marginsIn.top, 0, printableHeightIn - 0.05);
+        const w = roundIn(clamp(r.width, 0.08, printableWidthIn - x1));
+        const h = roundIn(clamp(r.height, 0.08, printableHeightIn - y1));
+        if (isCoveredByTablix(x1, y1, w, h)) continue;
+
+        const embName = registerEmbeddedImage(
+          r.imageAssetBase64,
+          r.imageAssetName ?? `Graphic_P${page.pageNumber}_${nameCounter}`
+        );
+        visualImages.push({
+          kind: 'Image',
+          name: nextUniqueName('Img'),
+          embeddedImageName: embName,
+          leftIn: roundIn(x1),
+          topIn: roundIn(y1),
+          widthIn: w,
+          heightIn: h,
+          sizing: 'FitProportional',
+        });
+      }
+
+      // 4. Collect freeform coordinate-locked Textboxes
+      const rawTextRegions = allRegions
+        .filter((r) => r.type === 'text' && r.text && r.text.trim().length > 0)
+        .filter((r) => {
+          const rx = clamp(r.x - marginsIn.left, 0, printableWidthIn);
+          const ry = clamp(r.y - marginsIn.top, 0, printableHeightIn);
+          return !isCoveredByTablix(rx, ry, r.width, r.height);
+        })
+        .sort((a, b) => (Math.abs(a.y - b.y) <= 0.06 ? a.x - b.x : a.y - b.y));
+
+      const visualTextboxes: VisualTextboxItem[] = [];
+      for (let i = 0; i < rawTextRegions.length; i++) {
+        const r = rawTextRegions[i];
+        let relX = clamp(r.x - marginsIn.left, 0, printableWidthIn - 0.1);
+        const relY = clamp(r.y - marginsIn.top, 0, printableHeightIn - 0.1);
+
+        // Find nearest right-hand sibling on the same visual line so width expansion doesn't collide
+        let nextLeft = printableWidthIn;
+        for (let j = i + 1; j < rawTextRegions.length; j++) {
+          const sib = rawTextRegions[j];
+          if (sib.y - r.y > 0.1) break;
+          const sibRelX = sib.x - marginsIn.left;
+          if (Math.abs(sib.y - r.y) <= 0.08 && sibRelX > relX + r.width * 0.4) {
+            nextLeft = Math.min(nextLeft, sibRelX - 0.02);
+            break;
+          }
+        }
+
+        const align = r.style.textAlign ?? 'Left';
+        let boxW = r.width + 0.08;
+        if (align === 'Center') {
+          const shift = Math.min(0.04, relX);
+          relX = relX - shift;
+        } else if (align === 'Right') {
+          const shift = Math.min(0.08, relX);
+          relX = relX - shift;
+        }
+        boxW = clamp(boxW, 0.08, Math.max(0.08, nextLeft - relX));
+
+        const minFontHeightIn = Math.max(r.height, (r.style.fontSizePt / 72) * 1.32);
+        const boxH = clamp(minFontHeightIn + 0.015, 0.11, printableHeightIn - relY);
+
+        // Clear box fills/borders on floating textboxes so the Rectangle layer paints cards/banners cleanly once
+        const cleanStyle: RegionStyle = {
+          ...r.style,
+          backgroundColor: undefined,
+          borderColor: undefined,
+          borderWidthPt: undefined,
+          verticalAlign: 'Middle',
+          paddingPt: { top: 0, right: 1, bottom: 0, left: 1 },
+        };
+
+        visualTextboxes.push({
+          kind: 'Textbox',
+          name: nextUniqueName('Txt'),
+          leftIn: roundIn(relX),
+          topIn: roundIn(relY),
+          widthIn: roundIn(boxW),
+          heightIn: roundIn(boxH),
+          text: r.text ?? '',
+          style: cleanStyle,
+        });
+      }
+
+      visualPages.push({
+        pageNumber: page.pageNumber,
+        widthIn: printableWidthIn,
+        heightIn: printableHeightIn,
+        rectangles: dedupedRects,
+        images: visualImages,
+        textboxes: visualTextboxes,
+        tablixes: pageTablixes,
+      });
     }
 
-    // Ensure at least standard parameters & fields exist if none were extracted
     if (parameterMap.size === 0) {
       parameterMap.set('ReportTitle', {
         name: 'ReportTitle',
@@ -345,8 +434,12 @@ export class TablixBuilder {
 
     const calculations = this.deriveCalculationRules(Array.from(fieldMap.values()));
 
-    this.logger.info('TablixBuilder', 'RDLC Tablix model constructed', {
+    this.logger.info('TablixBuilder', 'RDLC Tablix + Visual Layer model constructed', {
       tablixCount: tablixRegions.length,
+      visualPages: visualPages.length,
+      totalRects: visualPages.reduce((s, p) => s + p.rectangles.length, 0),
+      totalImages: visualPages.reduce((s, p) => s + p.images.length, 0),
+      totalTextboxes: visualPages.reduce((s, p) => s + p.textboxes.length, 0),
       fields: fieldMap.size,
       calculations: calculations.length,
     });
@@ -357,13 +450,499 @@ export class TablixBuilder {
       dataSetName,
       pageWidthIn: layout.document.pageWidth,
       pageHeightIn: layout.document.pageHeight,
-      marginsIn: { top: 0.35, right: 0.35, bottom: 0.35, left: 0.35 },
+      marginsIn,
       fields: Array.from(fieldMap.values()),
       parameters: Array.from(parameterMap.values()),
       calculations,
       tablixRegions,
       embeddedImages,
       existingPatternUsed: existingPattern?.sourceFiles.join(', ') || undefined,
+      visualPages,
+    };
+  }
+
+  private isGenuineTableBand(band: ReconstructedBand, vectorRects: LayoutRegion[]): boolean {
+    if (band.isRepeatingDetail) return true;
+    const numCols = band.columnWidths.length;
+    const numRows = band.rowHeights.length;
+    if (band.bandKind === 'Header' || band.bandKind === 'Footer' || band.bandKind === 'Cards') {
+      return false;
+    }
+    if (numCols < 2 || numCols > 8 || numRows < 2) {
+      return false;
+    }
+
+    const bandRects = vectorRects.filter(
+      (r) =>
+        r.x >= band.x - 0.08 &&
+        r.x + r.width <= band.x + band.width + 0.08 &&
+        r.y >= band.y - 0.08 &&
+        r.y + r.height <= band.y + band.height + 0.08 &&
+        r.height >= 0.14 &&
+        r.height <= 1.1 &&
+        r.width >= 0.35 &&
+        Boolean(r.style.backgroundColor || r.style.borderColor)
+    );
+
+    if (bandRects.length < 3) return false;
+
+    // Require distinct row-like rect bands (at least 2 distinct Y rows)
+    const distinctYs: number[] = [];
+    for (const r of bandRects) {
+      if (!distinctYs.some((y) => Math.abs(y - r.y) <= 0.08)) {
+        distinctYs.push(r.y);
+      }
+    }
+    return distinctYs.length >= 2;
+  }
+
+  private buildTablixForBand(
+    band: ReconstructedBand,
+    page: LayoutPage,
+    regionById: Map<string, LayoutRegion>,
+    vectorRects: LayoutRegion[],
+    fieldMap: Map<string, ReportFieldDef>,
+    dataSetName: string,
+    marginsIn: { top: number; right: number; bottom: number; left: number },
+    printableWidthIn: number,
+    printableHeightIn: number,
+    existingPattern: ExistingProjectPattern | undefined,
+    nextUniqueName: (prefix: string) => string,
+    registerEmbeddedImage: (b64: string, name: string) => string
+  ): TablixRegion | undefined {
+    if (band.isRepeatingDetail) {
+      return this.buildRepeatingLogicalTablix(
+        band,
+        page,
+        regionById,
+        vectorRects,
+        fieldMap,
+        dataSetName,
+        marginsIn,
+        printableWidthIn,
+        printableHeightIn,
+        nextUniqueName
+      );
+    }
+
+    const numCols = band.columnWidths.length;
+    const numRows = band.rowHeights.length;
+    if (numCols === 0 || numRows === 0) return undefined;
+
+    const cellLookup = new Map(band.cells.map((c) => [`${c.row}:${c.col}`, c]));
+    const skippedCoords = new Set<string>();
+    const rows: TablixRow[] = [];
+
+    const columnHeaderNames: string[] = [];
+
+    const findEnclosingRectForCell = (rIdx: number, cIdx: number, colSpan: number, rowSpan: number): LayoutRegion | undefined => {
+      const x1 = band.columnBoundaries[cIdx] ?? band.x;
+      const x2 = band.columnBoundaries[Math.min(band.columnBoundaries.length - 1, cIdx + colSpan)] ?? band.x + band.width;
+      const y1 = band.rowBoundaries[rIdx] ?? band.y;
+      const y2 = band.rowBoundaries[Math.min(band.rowBoundaries.length - 1, rIdx + rowSpan)] ?? band.y + band.height;
+      const cx = (x1 + x2) / 2;
+      const cy = (y1 + y2) / 2;
+      return vectorRects
+        .filter(
+          (vr) =>
+            cx >= vr.x - 0.04 &&
+            cx <= vr.x + vr.width + 0.04 &&
+            cy >= vr.y - 0.04 &&
+            cy <= vr.y + vr.height + 0.04 &&
+            vr.height <= (y2 - y1) * 2.6 + 0.25 &&
+            (vr.style.backgroundColor || vr.style.borderColor)
+        )
+        .sort((a, b) => a.width * a.height - b.width * b.height)[0];
+    };
+
+    for (let rIdx = 0; rIdx < numRows; rIdx++) {
+      const isDetailRow = band.isRepeatingDetail && rIdx === 1;
+      if (band.isRepeatingDetail && rIdx > 1) {
+        continue;
+      }
+
+      const rowCells: TablixCell[] = [];
+      for (let cIdx = 0; cIdx < numCols; cIdx++) {
+        const key = `${rIdx}:${cIdx}`;
+        if (skippedCoords.has(key)) {
+          rowCells.push({
+            colIndex: cIdx,
+            rowIndex: rIdx,
+            colSpan: 1,
+            rowSpan: 1,
+            skipBecauseMerged: true,
+            content: { kind: 'Empty', name: nextUniqueName('Empty') },
+          });
+          continue;
+        }
+
+        const assigned = cellLookup.get(key);
+        const colSpan = Math.min(numCols - cIdx, Math.max(1, assigned?.colSpan ?? 1));
+        const rowSpan = band.isRepeatingDetail
+          ? 1
+          : Math.min(numRows - rIdx, Math.max(1, assigned?.rowSpan ?? 1));
+
+        for (let rr = rIdx; rr < rIdx + rowSpan; rr++) {
+          for (let cc = cIdx; cc < cIdx + colSpan; cc++) {
+            if (rr !== rIdx || cc !== cIdx) {
+              skippedCoords.add(`${rr}:${cc}`);
+            }
+          }
+        }
+
+        const region = assigned?.primaryRegionId
+          ? regionById.get(assigned.primaryRegionId)
+          : undefined;
+        const cellRect = findEnclosingRectForCell(rIdx, cIdx, colSpan, rowSpan);
+
+        if (region && (region.type === 'image' || region.preferImageFallback) && region.imageAssetBase64) {
+          registerEmbeddedImage(
+            region.imageAssetBase64,
+            region.imageAssetName ?? `Graphic_P${page.pageNumber}_R${rIdx}C${cIdx}`
+          );
+          rowCells.push({
+            colIndex: cIdx,
+            rowIndex: rIdx,
+            colSpan,
+            rowSpan,
+            skipBecauseMerged: false,
+            content: {
+              kind: 'Image',
+              name: nextUniqueName('Img'),
+              mimeType: 'image/png',
+              base64Data: region.imageAssetBase64,
+              sizing: 'FitProportional',
+            },
+          });
+          continue;
+        }
+
+        if (region && region.type === 'text' && region.text) {
+          let value = region.text;
+          let isExpression = false;
+
+          if (isDetailRow) {
+            const fieldName = columnHeaderNames[cIdx] ?? sanitizeIdentifier(`Col${cIdx + 1}`, `Col${cIdx + 1}`);
+            const isNumeric = /^[\$\€\£]?\s*-?\d/.test(region.text.trim());
+            const isCalc = /total|amount|net|subtotal/i.test(fieldName);
+            if (!fieldMap.has(fieldName)) {
+              fieldMap.set(fieldName, {
+                name: fieldName,
+                dataType: isNumeric ? 'System.Decimal' : 'System.String',
+                sampleValue: isNumeric
+                  ? Number(region.text.replace(/[^0-9.-]/g, '')) || 0
+                  : region.text,
+                isCalculated: isCalc,
+              });
+            }
+            if (isCalc && fieldMap.has('Qty') && fieldMap.has('Price')) {
+              value = '=Code.CalculateLineTotal(Fields!Qty.Value, Fields!Price.Value, 0)';
+            } else {
+              value = `=Fields!${fieldName}.Value`;
+            }
+            isExpression = true;
+          } else if (
+            Boolean(existingPattern) &&
+            (region.semanticRole === 'fieldValue' || region.semanticRole === 'calculationField')
+          ) {
+            const fieldName = sanitizeIdentifier(
+              region.linkedField ?? `Field_${page.pageNumber}_${rIdx}_${cIdx}`,
+              `Field_${page.pageNumber}_${rIdx}_${cIdx}`
+            );
+            const isNumeric = /^[\$\€\£]?\s*-?\d/.test(region.text.trim());
+            if (!fieldMap.has(fieldName)) {
+              fieldMap.set(fieldName, {
+                name: fieldName,
+                dataType: isNumeric ? 'System.Decimal' : 'System.String',
+                sampleValue: isNumeric
+                  ? Number(region.text.replace(/[^0-9.-]/g, '')) || 0
+                  : region.text,
+                isCalculated: region.semanticRole === 'calculationField',
+              });
+            }
+            value =
+              region.semanticRole === 'calculationField' && fieldMap.has('Qty') && fieldMap.has('Price')
+                ? '=Code.CalculateNetTotal(Fields!Qty.Value, Fields!Price.Value, 0)'
+                : `=Fields!${fieldName}.Value`;
+            isExpression = true;
+          }
+
+          const cellStyle: RegionStyle = {
+            ...region.style,
+            backgroundColor: region.style.backgroundColor ?? cellRect?.style.backgroundColor,
+            borderColor: region.style.borderColor ?? cellRect?.style.borderColor ?? '#CBD5E1',
+            borderWidthPt: region.style.borderWidthPt ?? cellRect?.style.borderWidthPt ?? 0.5,
+          };
+
+          rowCells.push({
+            colIndex: cIdx,
+            rowIndex: rIdx,
+            colSpan,
+            rowSpan,
+            skipBecauseMerged: false,
+            content: {
+              kind: 'Textbox',
+              name: nextUniqueName('Txt'),
+              value,
+              isExpression,
+              style: cellStyle,
+              canGrow: true,
+            },
+          });
+          continue;
+        }
+
+        rowCells.push({
+          colIndex: cIdx,
+          rowIndex: rIdx,
+          colSpan,
+          rowSpan,
+          skipBecauseMerged: false,
+          content: {
+            kind: 'Textbox',
+            name: nextUniqueName('Cell'),
+            value: '',
+            isExpression: false,
+            style: {
+              fontFamily: 'Segoe UI',
+              fontSizePt: 9,
+              bold: false,
+              italic: false,
+              color: '#0F172A',
+              backgroundColor: region?.style.backgroundColor ?? cellRect?.style.backgroundColor,
+              borderColor: region?.style.borderColor ?? cellRect?.style.borderColor ?? '#CBD5E1',
+              borderWidthPt: region?.style.borderWidthPt ?? cellRect?.style.borderWidthPt ?? 0.5,
+              textAlign: 'Left',
+              verticalAlign: 'Middle',
+              paddingPt: { top: 1, right: 2, bottom: 1, left: 2 },
+            },
+            canGrow: true,
+          },
+        });
+      }
+
+      const rowHeightIn = Math.max(0.18, roundIn(band.rowHeights[rIdx] ?? 0.25));
+      rows.push({
+        heightIn: rowHeightIn,
+        isDetailRow,
+        cells: rowCells,
+      });
+    }
+
+    const leftIn = clamp(roundIn(band.x - marginsIn.left), 0, Math.max(0, printableWidthIn - 0.5));
+    const availableWidthIn = Math.max(0.5, printableWidthIn - leftIn - 0.01);
+
+    let columnWidthsIn = band.columnWidths.map((w) => Math.max(0.08, roundIn(w)));
+    const rawColSum = columnWidthsIn.reduce((s, w) => s + w, 0);
+    if (rawColSum > availableWidthIn && rawColSum > 0) {
+      const scale = availableWidthIn / rawColSum;
+      columnWidthsIn = columnWidthsIn.map((w) => Math.max(0.06, roundIn(w * scale)));
+      const scaledSum = columnWidthsIn.reduce((s, w) => s + w, 0);
+      if (scaledSum > availableWidthIn && columnWidthsIn.length > 0) {
+        let maxIdx = 0;
+        for (let i = 1; i < columnWidthsIn.length; i++) {
+          if (columnWidthsIn[i] > columnWidthsIn[maxIdx]) maxIdx = i;
+        }
+        const excess = scaledSum - availableWidthIn;
+        columnWidthsIn[maxIdx] = Math.max(0.06, roundIn(columnWidthsIn[maxIdx] - excess));
+      }
+    }
+
+    const pageRelTop = clamp(roundIn(band.y - marginsIn.top), 0, Math.max(0, printableHeightIn - 0.25));
+    const availableHeightIn = Math.max(0.25, printableHeightIn - pageRelTop - 0.05);
+    const rawRowSum = rows.reduce((s, r) => s + r.heightIn, 0);
+    if (rawRowSum > availableHeightIn && rawRowSum > 0) {
+      const scale = availableHeightIn / rawRowSum;
+      for (const r of rows) {
+        r.heightIn = Math.max(0.14, roundIn(r.heightIn * scale));
+      }
+    }
+
+    const totalTablixWidth = roundIn(columnWidthsIn.reduce((s, w) => s + w, 0));
+    const totalTablixHeight = roundIn(rows.reduce((s, r) => s + r.heightIn, 0));
+    const docTopIn = roundIn((page.pageNumber - 1) * page.height + pageRelTop);
+
+    return {
+      id: band.id,
+      name: sanitizeIdentifier(band.name, nextUniqueName('Tablix')),
+      pageNumber: page.pageNumber,
+      bandKind: band.bandKind,
+      topIn: docTopIn,
+      leftIn,
+      widthIn: totalTablixWidth,
+      heightIn: totalTablixHeight,
+      dataSetName,
+      isRepeatingDetail: band.isRepeatingDetail,
+      columnWidthsIn,
+      rows,
+    };
+  }
+
+  private buildRepeatingLogicalTablix(
+    band: ReconstructedBand,
+    page: LayoutPage,
+    regionById: Map<string, LayoutRegion>,
+    vectorRects: LayoutRegion[],
+    fieldMap: Map<string, ReportFieldDef>,
+    dataSetName: string,
+    marginsIn: { top: number; right: number; bottom: number; left: number },
+    printableWidthIn: number,
+    printableHeightIn: number,
+    nextUniqueName: (prefix: string) => string
+  ): TablixRegion | undefined {
+    const textRegions = band.sourceRegionIds
+      .map((id) => regionById.get(id))
+      .filter((r): r is LayoutRegion => Boolean(r && r.type === 'text' && r.text && r.text.trim().length > 0))
+      .sort((a, b) => (Math.abs(a.y - b.y) <= 0.08 ? a.x - b.x : a.y - b.y));
+
+    if (textRegions.length < 4) return undefined;
+
+    const logicalRows: LayoutRegion[][] = [];
+    for (const r of textRegions) {
+      const last = logicalRows[logicalRows.length - 1];
+      if (!last || Math.abs(last[0].y - r.y) > 0.08) {
+        logicalRows.push([r]);
+      } else {
+        last.push(r);
+      }
+    }
+    if (logicalRows.length < 2) return undefined;
+    for (const r of logicalRows) r.sort((a, b) => a.x - b.x);
+
+    const headerRegions = logicalRows[0];
+    const dataRegions = logicalRows[1];
+    const numCols = headerRegions.length;
+    if (numCols === 0) return undefined;
+
+    // Derive crisp column boundaries splitting halfway between adjacent headers inside band.x..band.x+band.width
+    const leftIn = clamp(roundIn(band.x - marginsIn.left), 0, Math.max(0, printableWidthIn - 0.5));
+    const rightBound = Math.min(band.x + band.width, marginsIn.left + printableWidthIn - 0.01);
+    const totalBandW = Math.max(0.5, rightBound - band.x);
+
+    const colStarts: number[] = [band.x];
+    for (let c = 1; c < numCols; c++) {
+      const prevEnd = headerRegions[c - 1].x + headerRegions[c - 1].width;
+      const curStart = headerRegions[c].x;
+      const splitX = curStart > prevEnd ? (prevEnd + curStart) / 2 : (headerRegions[c - 1].x + curStart) / 2;
+      colStarts.push(clamp(splitX, colStarts[c - 1] + 0.1, rightBound - (numCols - c) * 0.1));
+    }
+    colStarts.push(band.x + totalBandW);
+
+    const columnWidthsIn = Array.from({ length: numCols }, (_, c) =>
+      Math.max(0.1, roundIn(colStarts[c + 1] - colStarts[c]))
+    );
+
+    const findRowRect = (rowY: number): LayoutRegion | undefined =>
+      vectorRects
+        .filter((vr) => rowY >= vr.y - 0.05 && rowY <= vr.y + vr.height + 0.05 && vr.width >= totalBandW * 0.5)
+        .sort((a, b) => a.width * a.height - b.width * b.height)[0];
+
+    const headerRect = findRowRect(headerRegions[0].y);
+    const dataRect = findRowRect(dataRegions[0]?.y ?? headerRegions[0].y + 0.3);
+
+    const columnHeaderNames: string[] = [];
+    const headerCells: TablixCell[] = headerRegions.map((hReg, cIdx) => {
+      const colName = sanitizeIdentifier(hReg.text ?? `Column${cIdx + 1}`, `Column${cIdx + 1}`);
+      columnHeaderNames.push(colName);
+      return {
+        colIndex: cIdx,
+        rowIndex: 0,
+        colSpan: 1,
+        rowSpan: 1,
+        skipBecauseMerged: false,
+        content: {
+          kind: 'Textbox',
+          name: nextUniqueName('Txt'),
+          value: hReg.text ?? colName,
+          isExpression: false,
+          style: {
+            ...hReg.style,
+            backgroundColor: hReg.style.backgroundColor ?? headerRect?.style.backgroundColor ?? '#EEF2F6',
+            borderColor: hReg.style.borderColor ?? headerRect?.style.borderColor ?? '#CBD5E1',
+            borderWidthPt: hReg.style.borderWidthPt ?? headerRect?.style.borderWidthPt ?? 0.75,
+          },
+          canGrow: true,
+        },
+      };
+    });
+
+    const detailCells: TablixCell[] = [];
+    for (let cIdx = 0; cIdx < numCols; cIdx++) {
+      const colLeft = colStarts[cIdx];
+      const colRight = colStarts[cIdx + 1];
+      const matchedReg = dataRegions.find((dr) => {
+        const cx = dr.x + dr.width / 2;
+        return cx >= colLeft - 0.08 && cx <= colRight + 0.08;
+      }) ?? dataRegions[cIdx];
+
+      const fieldName = columnHeaderNames[cIdx] ?? `Col${cIdx + 1}`;
+      const sampleRaw = matchedReg?.text?.trim() ?? '';
+      const isNumeric = /^[\$\€\£]?\s*-?\d/.test(sampleRaw);
+      const isCalc = /total|amount|net|subtotal/i.test(fieldName);
+
+      if (!fieldMap.has(fieldName)) {
+        fieldMap.set(fieldName, {
+          name: fieldName,
+          dataType: isNumeric ? 'System.Decimal' : 'System.String',
+          sampleValue: isNumeric ? Number(sampleRaw.replace(/[^0-9.-]/g, '')) || 0 : sampleRaw || 'Sample',
+          isCalculated: isCalc,
+        });
+      }
+
+      const value =
+        isCalc && fieldMap.has('Qty') && fieldMap.has('Price')
+          ? '=Code.CalculateLineTotal(Fields!Qty.Value, Fields!Price.Value, 0)'
+          : `=Fields!${fieldName}.Value`;
+
+      detailCells.push({
+        colIndex: cIdx,
+        rowIndex: 1,
+        colSpan: 1,
+        rowSpan: 1,
+        skipBecauseMerged: false,
+        content: {
+          kind: 'Textbox',
+          name: nextUniqueName('Txt'),
+          value,
+          isExpression: true,
+          style: {
+            ...(matchedReg?.style ?? headerRegions[cIdx].style),
+            bold: false,
+            backgroundColor: matchedReg?.style.backgroundColor ?? dataRect?.style.backgroundColor,
+            borderColor: matchedReg?.style.borderColor ?? dataRect?.style.borderColor ?? '#CBD5E1',
+            borderWidthPt: matchedReg?.style.borderWidthPt ?? dataRect?.style.borderWidthPt ?? 0.5,
+          },
+          canGrow: true,
+        },
+      });
+    }
+
+    const headerH = Math.max(0.24, roundIn(headerRect?.height ?? headerRegions[0].height + 0.12));
+    const detailH = Math.max(0.24, roundIn(dataRect?.height ?? (dataRegions[0]?.height ?? 0.16) + 0.12));
+
+    const rows: TablixRow[] = [
+      { heightIn: headerH, isDetailRow: false, cells: headerCells },
+      { heightIn: detailH, isDetailRow: true, cells: detailCells },
+    ];
+
+    const pageRelTop = clamp(roundIn(band.y - marginsIn.top), 0, Math.max(0, printableHeightIn - headerH - detailH));
+    const totalTablixWidth = roundIn(columnWidthsIn.reduce((s, w) => s + w, 0));
+    const totalTablixHeight = roundIn(headerH + detailH);
+    const docTopIn = roundIn((page.pageNumber - 1) * page.height + pageRelTop);
+
+    return {
+      id: band.id,
+      name: sanitizeIdentifier(band.name, nextUniqueName('Tablix')),
+      pageNumber: page.pageNumber,
+      bandKind: band.bandKind,
+      topIn: docTopIn,
+      leftIn,
+      widthIn: totalTablixWidth,
+      heightIn: totalTablixHeight,
+      dataSetName,
+      isRepeatingDetail: true,
+      columnWidthsIn,
+      rows,
     };
   }
 
