@@ -1,13 +1,6 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { LLMGateway } from '../ai/llmGateway.ts';
-import {
-  BenchmarkRankingItem,
-  buildBenchmarkRankingPrompt,
-  validateBenchmarkRankingResponse,
-} from '../ai/prompts.ts';
-import { ReportGenConfig } from '../core/config.ts';
 import { StructuredLogger } from '../core/types.ts';
 import { ProjectStructureParser } from './projectStructureParser.ts';
 import { ReportGenProjectScanner } from './reportGenProjectScanner.ts';
@@ -44,22 +37,24 @@ export class ProjectScanner implements IReportGenProjectScanner {
   }
 }
 
+/**
+ * Ranks benchmark products using reproducible structural and text-overlap signals.
+ * Scores are intentionally local and deterministic; this class performs no network calls.
+ */
 export class DeterministicBenchmarkDiscovery implements IBenchmarkDiscovery {
   public async rankCandidates(
     products: ProductCatalogueEntry[],
     pdfA: TemplateAnalysis
   ): Promise<BenchmarkCandidate[]> {
     const pdfText = pdfA.layoutModel.pages
-      .flatMap((p) => p.regions.map((r) => (r.text ?? '').toLowerCase()))
+      .flatMap((page) => page.regions.map((region) => (region.text ?? '').toLowerCase()))
       .join(' ');
-
-    const pdfTables = pdfA.pages.reduce((s, p) => s + p.tablesDetected, 0);
+    const pdfTables = pdfA.pages.reduce((sum, page) => sum + page.tablesDetected, 0);
 
     return products
       .map((entry) => {
         const reasons: string[] = [];
         let score = 0.45;
-
         const completeness =
           [entry.builderPath, entry.elementPath, entry.layoutPath].filter(Boolean).length / 3;
         score += completeness * 0.25;
@@ -69,105 +64,49 @@ export class DeterministicBenchmarkDiscovery implements IBenchmarkDiscovery {
           score += 0.05;
           reasons.push(`Multi-RDLC modular pattern (${entry.layoutPaths!.length} RDLCs)`);
         }
-
         if (entry.elementSymbols.length > 0) {
           score += Math.min(0.15, entry.elementSymbols.length * 0.03);
           reasons.push(`${entry.elementSymbols.length} AST element symbol(s) available`);
         }
 
-        const candidateTerms = [
+        const terms = [
           entry.productCode.toLowerCase(),
-          ...entry.elementSymbols.map((s) => s.replace(/^Build|Element$/gi, '').toLowerCase()),
-          ...entry.parameters.map((p) => p.toLowerCase()),
-        ];
-        const overlapCount = candidateTerms.filter((term) => term.length >= 3 && pdfText.includes(term)).length;
+          ...entry.elementSymbols.map((symbol) => symbol.replace(/^Build|Element$/gi, '').toLowerCase()),
+          ...entry.parameters.map((parameter) => parameter.toLowerCase()),
+        ].filter((term) => term.length >= 3);
+        const overlapCount = terms.filter((term) => pdfText.includes(term)).length;
         if (overlapCount > 0) {
           score += Math.min(0.12, overlapCount * 0.04);
-          reasons.push(`${overlapCount} semantic term overlap(s) with PDF A template`);
+          reasons.push(`${overlapCount} text overlap(s) with PDF A template`);
         }
-
         if (pdfTables > 0 && entry.datasets.length > 0) {
           score += 0.05;
           reasons.push('Tabular DataSet bindings present for multi-column tables');
         }
 
-        const clamped = Math.round(Math.min(0.99, score) * 1000) / 1000;
+        const roundedScore = Math.round(Math.min(0.99, score) * 1000) / 1000;
         return {
           productCode: entry.productCode,
-          score: clamped,
-          deterministicScore: clamped,
-          semanticScore: clamped,
+          score: roundedScore,
+          deterministicScore: roundedScore,
+          semanticScore: roundedScore,
           strategy: 'Deterministic' as const,
           reasons,
         };
       })
-      .sort((a, b) => b.score - a.score);
+      // A stable tie-break avoids filesystem/discovery order affecting selections.
+      .sort((a, b) => b.score - a.score || a.productCode.localeCompare(b.productCode));
   }
 }
 
-export class HybridBenchmarkDiscovery implements IBenchmarkDiscovery {
-  private readonly logger: StructuredLogger;
-  private readonly gateway: LLMGateway;
-  private readonly fallback = new DeterministicBenchmarkDiscovery();
-
-  constructor(logger: StructuredLogger, config?: ReportGenConfig, gateway?: LLMGateway) {
-    this.logger = logger;
-    this.gateway = gateway ?? new LLMGateway({ logger, config });
-  }
-
-  public async rankCandidates(
-    products: ProductCatalogueEntry[],
-    pdfA: TemplateAnalysis
-  ): Promise<BenchmarkCandidate[]> {
-    const deterministic = await this.fallback.rankCandidates(products, pdfA);
-    if (!this.gateway.isAvailable() || products.length <= 1) {
-      return deterministic;
-    }
-
-    try {
-      const sampleHeadings = pdfA.layoutModel.pages
-        .flatMap((p) => p.regions.filter((r) => r.style.bold && r.text).map((r) => r.text!))
-        .slice(0, 15);
-
-      const request = buildBenchmarkRankingPrompt({
-        pdfHeadings: sampleHeadings,
-        pdfPageCount: pdfA.pageCount,
-        candidates: products.map((p) => ({
-          productCode: p.productCode,
-          elementSymbols: p.elementSymbols,
-          datasets: p.datasets,
-          parameters: p.parameters,
-          rdlcCount: p.layoutPaths?.length ?? (p.layoutPath ? 1 : 0),
-        })),
-      });
-
-      const { validated } = await this.gateway.execute<BenchmarkRankingItem[]>(
-        request,
-        (parsed) => validateBenchmarkRankingResponse(parsed)
-      );
-
-      const map = new Map(validated.map((r) => [r.productCode.toUpperCase(), r]));
-      return deterministic
-        .map((d) => {
-          const sem = map.get(d.productCode.toUpperCase());
-          if (!sem) return d;
-          const semanticScore = Math.max(0, Math.min(1, Number(sem.semanticScore) || d.deterministicScore));
-          const combined = Math.round((d.deterministicScore * 0.6 + semanticScore * 0.4) * 1000) / 1000;
-          return {
-            ...d,
-            score: combined,
-            semanticScore,
-            strategy: 'Hybrid' as const,
-            reasons: [...d.reasons, `AI semantic fit: ${sem.reason}`],
-          };
-        })
-        .sort((a, b) => b.score - a.score);
-    } catch (err) {
-      this.logger.warn('BenchmarkDiscovery', 'LLM semantic ranking fell back to deterministic', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return deterministic;
-    }
+/**
+ * Kept under its existing exported name for source compatibility. Ranking is now
+ * always deterministic; the extra constructor arguments are ignored so callers
+ * can migrate independently without retaining a provider dependency here.
+ */
+export class HybridBenchmarkDiscovery extends DeterministicBenchmarkDiscovery {
+  constructor(_logger: StructuredLogger, _config?: unknown, _legacyProvider?: unknown) {
+    super();
   }
 }
 
