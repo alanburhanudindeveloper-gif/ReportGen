@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import {
   CheckCircle2,
   Code2,
-  Cpu,
   Download,
   Eye,
   FileDown,
@@ -16,12 +15,13 @@ import {
   XCircle,
 } from 'lucide-react';
 import { ArtifactsPanel, ArtifactTab } from './ui/ArtifactsPanel.tsx';
+import { ConversionStudio } from './ui/ConversionStudio.tsx';
 import { LayoutInspector } from './ui/LayoutInspector.tsx';
 import { ProposalWorkspace } from './ui/ProposalWorkspace.tsx';
 import { FrontendPipelineResult } from './ui/types.ts';
 import { VerificationPanel } from './ui/VerificationPanel.tsx';
 
-type NavSection = 'proposal' | 'workbench' | 'layout' | 'ai' | 'artifacts' | 'verification' | 'mcp';
+type NavSection = 'proposal' | 'workbench' | 'layout' | 'artifacts' | 'verification' | 'mcp';
 
 interface SkillMeta {
   name: string;
@@ -44,10 +44,10 @@ interface McpToolMeta {
 export default function App() {
   const [section, setSection] = useState<NavSection>('workbench');
   const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [originalPdfBase64, setOriginalPdfBase64] = useState<string | undefined>(undefined);
   const [rdlcFile, setRdlcFile] = useState<File | null>(null);
   const [vbFile, setVbFile] = useState<File | null>(null);
   const [excelFile, setExcelFile] = useState<File | null>(null);
-  const [useAi, setUseAi] = useState(true);
 
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,12 +56,6 @@ export default function App() {
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [mcpTools, setMcpTools] = useState<McpToolMeta[]>([]);
   const [configData, setConfigData] = useState<Record<string, unknown> | null>(null);
-  const [llmStatus, setLlmStatus] = useState<{
-    enabled: boolean;
-    provider: string;
-    model: string;
-    status: string;
-  } | null>(null);
 
   const [stagedOutputs, setStagedOutputs] = useState<
     Array<{ folder: string; rdlcFile: string; rdlcBytes: number; hasPreviewHtml: boolean }>
@@ -89,13 +83,11 @@ export default function App() {
       fetch('/api/skills').then((r) => r.json()).catch(() => ({ skills: [] })),
       fetch('/api/mcp/tools').then((r) => r.json()).catch(() => ({ tools: [] })),
       fetch('/api/config').then((r) => r.json()).catch(() => null),
-      fetch('/api/health').then((r) => r.json()).catch(() => null),
       fetch('/api/outputs').then((r) => r.json()).catch(() => ({ outputs: [] })),
-    ]).then(([s, m, c, h, o]) => {
+    ]).then(([s, m, c, o]) => {
       setSkills(s.skills ?? []);
       setMcpTools(m.tools ?? []);
       setConfigData(c);
-      setLlmStatus(h?.llm ?? null);
       setStagedOutputs(o?.outputs ?? []);
     });
   }, []);
@@ -157,8 +149,18 @@ export default function App() {
     try {
       const form = new FormData();
       form.append('useFixture', String(useFixture));
-      form.append('useAi', String(useAi));
-      if (!useFixture && pdfFile) form.append('pdf', pdfFile);
+      if (!useFixture && pdfFile) {
+        form.append('pdf', pdfFile);
+        const buf = await pdfFile.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) {
+          bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        }
+        setOriginalPdfBase64(btoa(bin));
+      } else {
+        setOriginalPdfBase64(undefined);
+      }
       if (rdlcFile) form.append('existingRdlc', rdlcFile);
       if (vbFile) form.append('existingVb', vbFile);
       if (excelFile) form.append('excel', excelFile);
@@ -178,9 +180,8 @@ export default function App() {
 
   const navItems: Array<{ id: NavSection; label: string; icon: typeof Layers; disabled?: boolean }> = [
     { id: 'proposal', label: 'Proposal Adaptation', icon: Layers },
-    { id: 'workbench', label: 'Pipeline Input', icon: Upload },
+    { id: 'workbench', label: 'Verification Studio', icon: Upload },
     { id: 'layout', label: 'Layout & Tablix', icon: Layers, disabled: !result },
-    { id: 'ai', label: 'AI & Skills', icon: Cpu, disabled: !result },
     { id: 'artifacts', label: 'RDLC & VB.NET', icon: Code2, disabled: !result },
     { id: 'verification', label: 'Tests & Diff', icon: FileSpreadsheet, disabled: !result },
     { id: 'mcp', label: 'MCP & Config', icon: Wrench },
@@ -189,7 +190,11 @@ export default function App() {
   const totalRegions = result
     ? result.layoutModel.pages.reduce((s, p) => s + p.regions.length, 0)
     : 0;
-  const totalTablixes = result ? result.reportDefinition.tablixRegions.length : 0;
+  const totalTablixes = result
+    ? result.conversionMetrics?.tablixes ??
+      result.reportDefinition.bodyTablixes?.length ??
+      result.reportDefinition.tablixRegions.length
+    : 0;
 
   const handleDownloadReportSummary = () => {
     if (!result) return;
@@ -285,7 +290,7 @@ export default function App() {
                 : 'hover:text-slate-900'
             }`}
           >
-            Tablix Grid
+            Hierarchy &amp; Tablix
           </button>
           <button
             onClick={() => result && setSection('artifacts')}
@@ -324,20 +329,13 @@ export default function App() {
         </nav>
 
         <div className="flex items-center gap-3 shrink-0">
-          {llmStatus && (
-            <div className="hidden xl:block text-[11px] font-mono text-slate-600 border border-slate-200 rounded px-2.5 py-1 bg-slate-50">
-              {llmStatus.provider === 'none'
-                ? 'Runtime AI: disabled · Host Agent / Deterministic'
-                : `AI: ${llmStatus.provider} · ${llmStatus.model} · ${llmStatus.status}`}
-            </div>
-          )}
           <button
             onClick={() => executePipeline(!pdfFile)}
             disabled={running}
             className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-md hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 disabled:opacity-60"
           >
             <Play className="w-3.5 h-3.5" />
-            {running ? 'Executing...' : pdfFile ? 'Generate Report' : 'Run Verification Fixture'}
+            {running ? 'Converting...' : pdfFile ? 'Convert PDF to RDLC' : 'Run Verification Fixture'}
           </button>
         </div>
       </header>
@@ -413,10 +411,10 @@ export default function App() {
             <div className="space-y-6">
               <div className="border-b border-slate-200 pb-4">
                 <h1 className="font-display text-2xl font-bold tracking-tight text-slate-900 text-balance">
-                  PDF to RDLC Tablix &amp; VB.NET Generator
+                  Deterministic PDF to RDLC 2016 Verification Studio
                 </h1>
                 <p className="text-sm text-slate-600 mt-1 max-w-3xl">
-                  Deterministic PDF geometry extraction and grid clustering paired with bounded AI semantic disambiguation, RDLC 2016 Tablix XML serialization, VB.NET logic generation, and Excel oracle verification.
+                  Zero-AI forensic PDF geometry extraction, v3 100% Full-Tablix RDLC 2016 synthesis, deduplicated native PageHeader/PageFooter, VB.NET logic verification, and live pixel-parity inspection.
                 </p>
               </div>
 
@@ -479,15 +477,9 @@ export default function App() {
                 </div>
 
                 <div className="pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-4">
-                  <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={useAi}
-                      onChange={(e) => setUseAi(e.target.checked)}
-                      className="rounded border-slate-300"
-                    />
-                    Enable AI Semantic Reasoning for ambiguous regions (uses configured LLM provider; falls back deterministically when disabled/offline)
-                  </label>
+                  <div className="text-xs text-slate-600">
+                    100% deterministic offline conversion · v3 Full-Tablix RDLC 2016 body + native PageHeader/PageFooter
+                  </div>
 
                   <div className="flex items-center gap-3">
                     <button
@@ -502,15 +494,17 @@ export default function App() {
                       disabled={running || !pdfFile}
                       className="px-4 py-2 text-xs font-semibold bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
                     >
-                      {running ? 'Running Pipeline...' : 'Analyze & Generate Uploaded PDF'}
+                      {running ? 'Converting...' : 'Convert & Verify Uploaded PDF'}
                     </button>
                   </div>
                 </div>
               </div>
 
-              {/* Execution Summary & Logs */}
+              {/* Execution Summary, Side-by-Side Studio & Logs */}
               {result && (
                 <div className="space-y-6">
+                  <ConversionStudio result={result} originalPdfBase64={originalPdfBase64} />
+
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                     <div className="bg-white border border-slate-200 rounded-lg p-4">
                       <div className="text-xs text-slate-500">Extracted Regions</div>
@@ -528,19 +522,19 @@ export default function App() {
                         {totalTablixes}
                       </div>
                       <div className="mt-1 text-[11px] text-slate-500">
-                        10-Point Gate: {result.rdlcValidation.valid ? 'PASS' : 'FAIL'}
+                        {result.rdlcValidation.checkedRules || 15}-Point Gate: {result.rdlcValidation.valid ? 'PASS' : 'FAIL'}
                       </div>
                     </div>
 
                     <div className="bg-white border border-slate-200 rounded-lg p-4">
-                      <div className="text-xs text-slate-500">AI Token Reduction</div>
+                      <div className="text-xs text-slate-500">Visual Parity</div>
                       <div className="mt-1 text-xl font-semibold font-mono tabular-nums text-slate-900">
-                        {result.aiResult ? `${result.aiResult.tokenEstimate.reductionPercent}%` : '100%'}
+                        {result.visualDiff?.available
+                          ? `${(result.visualDiff.overallParityPercent ?? result.visualDiff.overallSimilarity * 100).toFixed(2)}%`
+                          : 'N/A'}
                       </div>
                       <div className="mt-1 text-[11px] text-slate-500 tabular-nums">
-                        {result.aiResult
-                          ? `${result.aiResult.tokenEstimate.sentRegions}/${result.aiResult.tokenEstimate.totalRegions} ambiguous sent`
-                          : '0 ambiguous regions'}
+                        MAE {(result.visualDiff?.meanAbsoluteError ?? 0).toFixed(2)} · Deterministic SHA-256
                       </div>
                     </div>
 
@@ -565,7 +559,7 @@ export default function App() {
                       )}
                       <span className="font-medium text-slate-900">
                         {result.finalized
-                          ? 'Artifacts finalized (RDLC 10-point validation & VB logic tests passed).'
+                          ? `Artifacts finalized (RDLC ${result.rdlcValidation.checkedRules || 15}-point validation & VB logic tests passed).`
                           : 'Finalization blocked by validation or logic test gate.'}
                       </span>
                       <span className="text-slate-400">·</span>
@@ -634,7 +628,7 @@ export default function App() {
                     <div>
                       <h2 className="text-sm font-semibold text-slate-900">Staged Output RDLC Visual Previews</h2>
                       <p className="text-xs text-slate-500 mt-0.5">
-                        Inspect generated RDLC packages from <span className="font-mono">output/</span> with 10-point validation and programmatic 1:1 coordinate rendering.
+                        Inspect generated RDLC packages from <span className="font-mono">output/</span> with 15-point validation and programmatic 1:1 coordinate rendering.
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
@@ -709,87 +703,6 @@ export default function App() {
           )}
 
           {section === 'layout' && result && <LayoutInspector result={result} />}
-
-          {section === 'ai' && result && (
-            <div className="space-y-6">
-              <div className="border-b border-slate-200 pb-4">
-                <h2 className="font-display text-xl font-bold text-slate-900">
-                  Context Engineering &amp; AI Semantic Decisions
-                </h2>
-                <p className="text-xs text-slate-600 mt-1">
-                  Only ambiguous regions and selectively matched skills are sent to the AI provider. Deterministic code preserves all geometry.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="bg-white border border-slate-200 rounded-lg p-4">
-                  <div className="text-xs text-slate-500">Active Provider</div>
-                  <div className="mt-1 text-sm font-mono font-semibold text-slate-900">
-                    {result.aiResult?.provider ?? 'deterministic-only'} ({result.aiResult?.model ?? 'none'})
-                  </div>
-                </div>
-                <div className="bg-white border border-slate-200 rounded-lg p-4">
-                  <div className="text-xs text-slate-500">Selectively Loaded Skills</div>
-                  <div className="mt-1 text-sm font-mono font-semibold text-slate-900">
-                    {result.aiResult?.usedSkills.join(', ') || 'None required'}
-                  </div>
-                </div>
-                <div className="bg-white border border-slate-200 rounded-lg p-4">
-                  <div className="text-xs text-slate-500">Token Payload Reduction</div>
-                  <div className="mt-1 text-sm font-mono font-semibold text-slate-900 tabular-nums">
-                    {result.aiResult?.tokenEstimate.reductionPercent ?? 100}% skipped
-                  </div>
-                </div>
-              </div>
-
-              {result.existingPattern && (
-                <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-2">
-                  <h3 className="text-sm font-semibold text-slate-900">
-                    Inspected Existing Project Pattern ({result.existingPattern.sourceFiles.join(', ')})
-                  </h3>
-                  <p className="text-xs font-mono text-slate-600">
-                    DataSet: {result.existingPattern.dataSetName} · Fields:{' '}
-                    {result.existingPattern.fields.join(', ') || 'None'} · VB Functions:{' '}
-                    {result.existingPattern.vbFunctions.map((f) => f.name).join(', ') || 'None'}
-                  </p>
-                </div>
-              )}
-
-              <div className="bg-white border border-slate-200 rounded-lg p-4 overflow-x-auto">
-                <h3 className="text-sm font-semibold text-slate-900 mb-3">
-                  Structured Decisions Returned by AI
-                </h3>
-                {result.aiResult && result.aiResult.decisions.length > 0 ? (
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="border-b border-slate-200 text-slate-500">
-                        <th className="py-2 pr-4 font-medium">Region ID</th>
-                        <th className="py-2 pr-4 font-medium">Semantic Role</th>
-                        <th className="py-2 pr-4 font-medium">Linked Field</th>
-                        <th className="py-2 pr-4 font-medium text-right">Confidence</th>
-                        <th className="py-2 font-medium">Rationale</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {result.aiResult.decisions.map((d) => (
-                        <tr key={d.regionId}>
-                          <td className="py-2 pr-4 font-mono text-slate-800">{d.regionId}</td>
-                          <td className="py-2 pr-4 font-mono text-blue-700">{d.semanticRole}</td>
-                          <td className="py-2 pr-4 font-mono text-slate-600">{d.linkedField ?? '—'}</td>
-                          <td className="py-2 pr-4 font-mono text-right tabular-nums">
-                            {(d.confidence * 100).toFixed(0)}%
-                          </td>
-                          <td className="py-2 text-slate-600">{d.rationale}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : (
-                  <p className="text-xs text-slate-500">All regions were resolved deterministically without AI calls.</p>
-                )}
-              </div>
-            </div>
-          )}
 
           {section === 'artifacts' && result && <ArtifactsPanel result={result} initialTab={artifactsInitialTab} />}
 

@@ -56,6 +56,41 @@ export interface FrontendLayoutPage {
   rasterPreviewBase64?: string;
 }
 
+export interface FrontendTablixRegion {
+  id: string;
+  name: string;
+  pageNumber: number;
+  bandKind: string;
+  archetype?: 'A' | 'B' | 'C' | 'D';
+  topIn: number;
+  leftIn: number;
+  widthIn: number;
+  heightIn: number;
+  isRepeatingDetail: boolean;
+  columnWidthsIn: number[];
+  rows: Array<{
+    heightIn: number;
+    isDetailRow: boolean;
+    pageBreakBefore?: boolean;
+    cells: Array<{
+      colIndex: number;
+      rowIndex: number;
+      colSpan: number;
+      rowSpan: number;
+      skipBecauseMerged: boolean;
+      content: {
+        kind: string;
+        name: string;
+        value?: string;
+        isExpression?: boolean;
+        tablix?: FrontendTablixRegion;
+        textboxes?: Array<{ name: string; text?: string }>;
+        images?: Array<{ name: string }>;
+      };
+    }>;
+  }>;
+}
+
 export interface FrontendPipelineResult {
   runId: string;
   documentName: string;
@@ -81,24 +116,24 @@ export interface FrontendPipelineResult {
     vbFunctions: Array<{ name: string; signature: string; bodyPreview: string }>;
     conventions: string[];
   };
-  aiResult?: {
-    provider: string;
-    model: string;
-    usedSkills: string[];
-    tokenEstimate: {
-      sentRegions: number;
-      totalRegions: number;
-      reductionPercent: number;
-    };
-    decisions: Array<{
-      regionId: string;
-      semanticRole: string;
-      linkedField?: string;
-      bandOverride?: string;
-      preferImageFallback?: boolean;
-      confidence: number;
-      rationale: string;
-    }>;
+  rdlcSha256?: string;
+  rdlcSchemaVersion?: '2008' | '2016';
+  conversionMetrics?: {
+    textboxes: number;
+    tablixes: number;
+    nestedTablixes?: number;
+    layer0Pages: number;
+    glyphFallbacks: number;
+    deduplicatedFakeBold: number;
+    parameters: number;
+    sectionsCount?: number;
+    dualColumnSections?: number;
+    printOnFirstPage?: boolean;
+    nativeHeaderPresent?: boolean;
+    nativeFooterPresent?: boolean;
+    archetypes?: { A: number; B: number; C: number; D: number };
+    collisionsCount?: number;
+    renderedPageCount?: number;
   };
   reportDefinition: {
     reportName: string;
@@ -107,36 +142,72 @@ export interface FrontendPipelineResult {
     pageWidthIn: number;
     pageHeightIn: number;
     fields: Array<{ name: string; dataType: string; sampleValue: string | number; isCalculated: boolean }>;
-    parameters: Array<{ name: string; dataType: string; prompt: string }>;
+    parameters: Array<{ name: string; dataType: string; prompt: string; defaultValue?: string; matchedPattern?: string; pageNumber?: number }>;
     calculations: Array<{ functionName: string; targetField: string; expressionSummary: string }>;
-    tablixRegions: Array<{
-      id: string;
+    tablixRegions: FrontendTablixRegion[];
+    bodyTablixes?: FrontendTablixRegion[];
+    hierarchy?: {
+      mode: 'v3-full-tablix-single-rdlc' | 'v2-hierarchical-single-rdlc';
+      pageHeader?: {
+        heightIn: number;
+        printOnFirstPage: boolean;
+        printOnLastPage: boolean;
+        assetCount: number;
+        textLabels: string[];
+      };
+      pageFooter?: {
+        heightIn: number;
+        printOnFirstPage: boolean;
+        printOnLastPage: boolean;
+        assetCount: number;
+        textLabels: string[];
+      };
+      sections: Array<{
+        name: string;
+        slug: string;
+        pageNumber: number;
+        pageBreakStart: boolean;
+        topIn: number;
+        leftIn: number;
+        widthIn: number;
+        heightIn: number;
+        layoutType:
+          | 'Single-Column'
+          | 'Dual-Column'
+          | 'Multi-Column'
+          | 'Tablix'
+          | 'Clause-List'
+          | 'Hybrid-Callout';
+        archetype?: 'A' | 'B' | 'C' | 'D';
+        rowCount?: number;
+        colCount?: number;
+        hasNestedTablixes?: boolean;
+        columnCount?: number;
+        hasHeaderBand: boolean;
+        hasLeftColumn: boolean;
+        hasRightColumn: boolean;
+        hasFooterBand: boolean;
+        childItemCount: number;
+      }>;
+    };
+    bodySections?: Array<{
       name: string;
-      pageNumber: number;
-      bandKind: string;
-      topIn: number;
       leftIn: number;
+      topIn: number;
       widthIn: number;
       heightIn: number;
-      isRepeatingDetail: boolean;
-      columnWidthsIn: number[];
-      rows: Array<{
-        heightIn: number;
-        isDetailRow: boolean;
-        cells: Array<{
-          colIndex: number;
-          rowIndex: number;
-          colSpan: number;
-          rowSpan: number;
-          skipBecauseMerged: boolean;
-          content: {
-            kind: string;
-            name: string;
-            value?: string;
-            isExpression?: boolean;
-          };
+      pageNumber?: number;
+      role?: string;
+      children?: {
+        rectangles: Array<{
+          name: string;
+          leftIn: number;
+          topIn: number;
+          widthIn: number;
+          heightIn: number;
+          role?: string;
         }>;
-      }>;
+      };
     }>;
   };
   rdlcXml: string;
@@ -175,10 +246,14 @@ export interface FrontendPipelineResult {
     available: boolean;
     targetSimilarity: number;
     overallSimilarity: number;
+    overallParityPercent?: number;
+    meanAbsoluteError?: number;
     note: string;
     pages: Array<{
       page: number;
       similarity: number;
+      parityPercent?: number;
+      meanAbsoluteError?: number;
       mismatchPixels: number;
       totalPixels: number;
       diffImageBase64?: string;

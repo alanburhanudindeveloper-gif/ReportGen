@@ -1,12 +1,6 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { LLMGateway } from '../ai/llmGateway.ts';
-import {
-  BenchmarkRankingItem,
-  buildBenchmarkRankingPrompt,
-  validateBenchmarkRankingResponse,
-} from '../ai/prompts.ts';
 import { ReportGenConfig } from '../core/config.ts';
 import { StructuredLogger } from '../core/types.ts';
 import { ProjectStructureParser } from './projectStructureParser.ts';
@@ -107,67 +101,22 @@ export class DeterministicBenchmarkDiscovery implements IBenchmarkDiscovery {
 
 export class HybridBenchmarkDiscovery implements IBenchmarkDiscovery {
   private readonly logger: StructuredLogger;
-  private readonly gateway: LLMGateway;
   private readonly fallback = new DeterministicBenchmarkDiscovery();
 
-  constructor(logger: StructuredLogger, config?: ReportGenConfig, gateway?: LLMGateway) {
+  constructor(logger: StructuredLogger, _config?: ReportGenConfig) {
     this.logger = logger;
-    this.gateway = gateway ?? new LLMGateway({ logger, config });
   }
 
   public async rankCandidates(
     products: ProductCatalogueEntry[],
     pdfA: TemplateAnalysis
   ): Promise<BenchmarkCandidate[]> {
-    const deterministic = await this.fallback.rankCandidates(products, pdfA);
-    if (!this.gateway.isAvailable() || products.length <= 1) {
-      return deterministic;
-    }
-
-    try {
-      const sampleHeadings = pdfA.layoutModel.pages
-        .flatMap((p) => p.regions.filter((r) => r.style.bold && r.text).map((r) => r.text!))
-        .slice(0, 15);
-
-      const request = buildBenchmarkRankingPrompt({
-        pdfHeadings: sampleHeadings,
-        pdfPageCount: pdfA.pageCount,
-        candidates: products.map((p) => ({
-          productCode: p.productCode,
-          elementSymbols: p.elementSymbols,
-          datasets: p.datasets,
-          parameters: p.parameters,
-          rdlcCount: p.layoutPaths?.length ?? (p.layoutPath ? 1 : 0),
-        })),
-      });
-
-      const { validated } = await this.gateway.execute<BenchmarkRankingItem[]>(
-        request,
-        (parsed) => validateBenchmarkRankingResponse(parsed)
-      );
-
-      const map = new Map(validated.map((r) => [r.productCode.toUpperCase(), r]));
-      return deterministic
-        .map((d) => {
-          const sem = map.get(d.productCode.toUpperCase());
-          if (!sem) return d;
-          const semanticScore = Math.max(0, Math.min(1, Number(sem.semanticScore) || d.deterministicScore));
-          const combined = Math.round((d.deterministicScore * 0.6 + semanticScore * 0.4) * 1000) / 1000;
-          return {
-            ...d,
-            score: combined,
-            semanticScore,
-            strategy: 'Hybrid' as const,
-            reasons: [...d.reasons, `AI semantic fit: ${sem.reason}`],
-          };
-        })
-        .sort((a, b) => b.score - a.score);
-    } catch (err) {
-      this.logger.warn('BenchmarkDiscovery', 'LLM semantic ranking fell back to deterministic', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return deterministic;
-    }
+    const ranked = await this.fallback.rankCandidates(products, pdfA);
+    this.logger.info('BenchmarkDiscovery', 'Ranked benchmark candidates deterministically', {
+      candidates: ranked.length,
+      top: ranked[0]?.productCode,
+    });
+    return ranked;
   }
 }
 

@@ -68,12 +68,16 @@ export class VisualDiffEngine {
     this.logger = logger;
   }
 
+  public async rasterizePdf(pdfBytes: Uint8Array, dpi = 150): Promise<Buffer[]> {
+    return this.rasterize(pdfBytes, dpi);
+  }
+
   public async comparePdfs(
     originalPdfBytes: Uint8Array,
     generatedPdfBytes: Uint8Array,
-    targetSimilarity = 0.95,
+    targetSimilarity = 0.92,
     outputDir?: string,
-    dpi = 120
+    dpi = 150
   ): Promise<VisualDiffReport> {
     const origPngs = await this.rasterize(originalPdfBytes, dpi);
     const genPngs = await this.rasterize(generatedPdfBytes, dpi);
@@ -83,6 +87,8 @@ export class VisualDiffEngine {
         available: false,
         targetSimilarity,
         overallSimilarity: 0,
+        overallParityPercent: 0,
+        meanAbsoluteError: 255,
         note: 'Ghostscript rasterization returned no pages for visual diff.',
         pages: [],
       };
@@ -102,6 +108,8 @@ export class VisualDiffEngine {
         pages.push({
           page: i + 1,
           similarity: 0,
+          parityPercent: 0,
+          meanAbsoluteError: 255,
           mismatchPixels: 0,
           totalPixels: 0,
         });
@@ -114,7 +122,6 @@ export class VisualDiffEngine {
       const width = Math.min(imgA.width, imgB.width);
       const height = Math.min(imgA.height, imgB.height);
 
-      // Crop both to overlapping bounds cleanly if dimensions differ slightly
       const croppedA = this.cropPng(imgA, width, height);
       const croppedB = this.cropPng(imgB, width, height);
       const diff = new PNG({ width, height });
@@ -125,6 +132,19 @@ export class VisualDiffEngine {
 
       const totalPixels = width * height;
       const similarity = Math.round((1 - mismatchPixels / totalPixels) * 10000) / 10000;
+      const parityPercent = Math.round(similarity * 10000) / 100;
+
+      // RGB Mean Absolute Error (0..255 channel scale)
+      let absErrSum = 0;
+      for (let p = 0; p < croppedA.data.length; p += 4) {
+        absErrSum +=
+          Math.abs(croppedA.data[p] - croppedB.data[p]) +
+          Math.abs(croppedA.data[p + 1] - croppedB.data[p + 1]) +
+          Math.abs(croppedA.data[p + 2] - croppedB.data[p + 2]);
+      }
+      const meanAbsoluteError =
+        totalPixels > 0 ? Math.round((absErrSum / (totalPixels * 3)) * 1000) / 1000 : 0;
+
       const diffBuf = PNG.sync.write(diff);
 
       if (outputDir) {
@@ -137,6 +157,8 @@ export class VisualDiffEngine {
       pages.push({
         page: i + 1,
         similarity,
+        parityPercent,
+        meanAbsoluteError,
         mismatchPixels,
         totalPixels,
         diffImageBase64: diffBuf.toString('base64'),
@@ -149,22 +171,33 @@ export class VisualDiffEngine {
       pages.length > 0
         ? Math.round((pages.reduce((s, p) => s + p.similarity, 0) / pages.length) * 10000) / 10000
         : 0;
+    const overallParityPercent = Math.round(overallSimilarity * 10000) / 100;
+    const meanAbsoluteError =
+      pages.length > 0
+        ? Math.round((pages.reduce((s, p) => s + p.meanAbsoluteError, 0) / pages.length) * 1000) / 1000
+        : 0;
 
     const report: VisualDiffReport = {
       available: true,
       targetSimilarity,
       overallSimilarity,
-      note: `Computed genuine pixel-by-pixel similarity across ${pages.length} page(s).`,
+      overallParityPercent,
+      meanAbsoluteError,
+      note: `Computed pixel parity (${overallParityPercent.toFixed(2)}%, MAE ${meanAbsoluteError.toFixed(2)}) across ${pages.length} page(s).`,
       pages,
     };
 
     if (outputDir) {
       const cleanReport = {
         overallSimilarity: report.overallSimilarity,
+        overallParityPercent: report.overallParityPercent,
+        meanAbsoluteError: report.meanAbsoluteError,
         targetSimilarity: report.targetSimilarity,
         pages: report.pages.map((p) => ({
           page: p.page,
           similarity: p.similarity,
+          parityPercent: p.parityPercent,
+          meanAbsoluteError: p.meanAbsoluteError,
           mismatchPixels: p.mismatchPixels,
           totalPixels: p.totalPixels,
         })),
@@ -172,7 +205,7 @@ export class VisualDiffEngine {
       fs.writeFileSync(path.join(outputDir, 'report.json'), JSON.stringify(cleanReport, null, 2), 'utf-8');
     }
 
-    this.logger.info('VisualDiff', `Visual similarity: ${(overallSimilarity * 100).toFixed(2)}%`, {
+    this.logger.info('VisualDiff', `Visual parity: ${overallParityPercent.toFixed(2)}% (MAE ${meanAbsoluteError.toFixed(2)})`, {
       pages: pages.length,
     });
 

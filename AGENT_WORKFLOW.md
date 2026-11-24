@@ -18,9 +18,9 @@ User Prompt / Input (PDF A, PDF B, .vbproj/.vb/.rdlc, .xlsx)
    └── Outputs compact structured JSON wrapped in UNTRUSTED_DOCUMENT_DATA
    │
    ▼
-2. DIFFERENTIAL ANALYSIS & OPTIONAL REASONING
+2. DIFFERENTIAL ANALYSIS & DETERMINISTIC BANDING
    ├── Deterministic rules resolve layout grids, bands, bindings & symbol diffs
-   └── Optional LLM reasoning (Host VS Code Agent OR opt-in LLMGateway) only on ambiguous slices
+   └── Regex ParameterDetector & TablixBuilder bind fields without external LLMs
    │
    ▼
 3. PROPOSAL STAGING / DRY-RUN (Non-Mutating)
@@ -69,16 +69,15 @@ User Prompt / Input (PDF A, PDF B, .vbproj/.vb/.rdlc, .xlsx)
 - **Proposal Adaptation Engine (`src/engine/proposal/`)**: `ReportGenProjectScanner`, `ProjectStructureParser`, `VbAstAnalyzer`, `TechnologyDetector`, `BenchmarkInspector`, `DummyDataExtractor`, `DifferentialAnalyzer`, `MinimalMutationPatcher`, `Rdlc2008Patcher`, `ReportTestHarness`, `StagingManager`, and `ProjectInserter`.
 - **Tool Governance Registry (`src/engine/mcp/mcpTools.ts`)**: Categorizes every tool into `READ_ONLY`, `VALIDATION`, `PROPOSAL`, or `MUTATION` and enforces `assertAgentToolApproval()`.
 
-### C. Provider-Agnostic AI Policy (`src/engine/ai/`, `reportgen.config.yaml`)
-- **Default Safe Posture**: `reportgen.config.yaml` and `src/engine/core/config.ts` default `ai.provider` to `none` (`deterministic-only`). ReportGen makes **zero external LLM calls** and requires **no API keys** unless explicitly configured (`LLM_PROVIDER=gemini|openai|openai-compatible|claude`).
-- **No AI Fallback**: If a configured provider or host Agent is unavailable, ReportGen **never** silently switches to Gemini, OpenAI, Claude, or another external model; it stops or continues with deterministic rules only.
+### C. Zero-AI Deterministic Policy (`reportgen.config.yaml`)
+- **Strict Offline Determinism**: ReportGen contains **zero AI/LLM SDKs or model calls** (`@google/genai` completely removed) and requires **no API keys**. Every layout extraction, Dual-Layer Hybrid RDLC build, and visual diff step is 100% reproducible.
 
 ---
 
 ## 3. Security Boundaries
 
 ### 1. Untrusted Document Content (`UNTRUSTED_DOCUMENT_DATA`)
-- Implemented in `src/engine/core/untrustedContent.ts` and enforced in `src/cli/reportgen.ts`, `src/cli/proposalCli.ts`, and `src/engine/ai/prompts.ts`.
+- Implemented in `src/engine/core/untrustedContent.ts` and enforced in `src/cli/reportgen.ts` and `src/cli/proposalCli.ts`.
 - All content parsed from `.pdf`, `.rdlc`, `.vb`, `.vbproj`/`.csproj`, and `.xlsx` files is treated strictly as **untrusted DATA**, never executable instructions.
 - CLI JSON outputs wrap extracted data using `wrapUntrustedData()`:
   ```json
@@ -91,13 +90,13 @@ User Prompt / Input (PDF A, PDF B, .vbproj/.vb/.rdlc, .xlsx)
     "data": { ... }
   }
   ```
-- Prompt payloads passed through `LLMGateway` are isolated inside `<untrusted_document_data>...</untrusted_document_data>` delimiters, and `detectPromptInjectionIndicators()` flags instruction-override or exfiltration text deterministically.
+- `detectPromptInjectionIndicators()` deterministically scans extracted document payloads for instruction-override or exfiltration text before returning structured JSON.
 
 ### 2. Credential, File & Network Isolation
 - **Host-Owned Auth**: ReportGen never accesses VS Code tokens, GitHub credentials, Copilot tokens, browser cookies, or OS credential stores.
 - **Path-Traversal Guard**: `resolveSafeSubpath()` and `security.allowedExtensions` block writes outside approved roots or extensions.
 - **Fail-Closed Mutation Guard**: `assertAgentToolApproval()` rejects unregistered tools and blocks `MUTATION` tools (`approve_staging`, `insert_confirm`, `write_to_project`) with `SECURITY_VIOLATION` unless explicit approval is supplied.
-- **Zero-Secret Health/Config APIs**: `/api/health` and `/api/config` return only provider status metadata (`enabled`, `provider`, `model`, `status`), never API keys.
+- **Zero-Secret Health/Config APIs**: `/api/health` and `/api/config` return only deterministic engine metadata, never secrets or API keys.
 
 ---
 
@@ -126,16 +125,15 @@ npm run reportgen -- analyze input.pdf --stdout
 
 ### Step 2 — Generate & Preview Proposals Without Modifying Project Files (`PROPOSAL`)
 ```bash
-# Dry-run core generation (validates in memory, writes nothing to disk)
-npm run reportgen -- generate input.pdf --no-ai --dry-run
+# Dry-run core generation (validates in memory, computes SHA-256 & visual parity, writes nothing to disk)
+npm run reportgen -- generate input.pdf --dry-run
 
 # Generate staged Two-PDF proposal adaptation into isolated output/<CODE>/
 npm run proposal-cli -- generate \
   --project samples/SampleProposalProject \
   --product EGA \
   --benchmark MFA \
-  --fixture \
-  --no-ai
+  --fixture
 
 # Preview staged diff summary, preserved ratio, validation & approval state (read-only)
 npm run proposal-cli -- preview --generated output/EGA

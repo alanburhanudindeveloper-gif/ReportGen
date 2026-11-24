@@ -6,7 +6,6 @@ import { ReportGenError, ReportGenErrorCode, StructuredLogger } from '../core/ty
 import { GridReconstructor } from '../pdf/gridReconstructor.ts';
 import { PdfAnalyzer } from '../pdf/pdfAnalyzer.ts';
 import { SkillManager } from '../skills/skillManager.ts';
-import { LLMGateway } from '../ai/llmGateway.ts';
 import { BenchmarkInspector } from './benchmarkInspector.ts';
 import { DifferentialAnalyzer } from './differentialAnalyzer.ts';
 import { applyManualFieldConfirmations, DummyDataExtractor } from './dummyDataExtractor.ts';
@@ -45,19 +44,18 @@ export class ProposalOrchestrator {
   private readonly testHarness: ReportTestHarness;
   private readonly stagingManager: StagingManager;
 
-  constructor(config?: ReportGenConfig, echoLogs = false, gatewayOverride?: LLMGateway) {
+  constructor(config?: ReportGenConfig, echoLogs = false) {
     this.config = config ?? loadConfig();
     this.logger = new StructuredLogger(echoLogs);
     const skillManager = new SkillManager(this.logger);
-    const llmGateway = gatewayOverride ?? new LLMGateway({ logger: this.logger, config: this.config });
 
     this.scanner = new ProjectScanner(this.logger);
-    this.discovery = new HybridBenchmarkDiscovery(this.logger, this.config, llmGateway);
+    this.discovery = new HybridBenchmarkDiscovery(this.logger, this.config);
     this.inspector = new BenchmarkInspector(this.logger);
     this.pdfAnalyzer = new PdfAnalyzer(this.logger);
     this.gridReconstructor = new GridReconstructor(this.logger);
-    this.dummyExtractor = new DummyDataExtractor(this.logger, this.config.ai.confidenceThreshold);
-    this.diffAnalyzer = new DifferentialAnalyzer(this.logger, skillManager, this.config, llmGateway);
+    this.dummyExtractor = new DummyDataExtractor(this.logger, this.config.validation.confidenceThreshold);
+    this.diffAnalyzer = new DifferentialAnalyzer(this.logger, skillManager, this.config);
     this.defBuilder = new ProposalDefinitionBuilder(this.logger);
     this.vbGenerator = new ProposalVbGenerator(this.logger);
     this.rdlcGenerator = new ProposalRdlcGenerator(this.logger);
@@ -140,7 +138,6 @@ export class ProposalOrchestrator {
     pdfAFileName: string;
     pdfBBytes?: Uint8Array;
     pdfBFileName?: string;
-    useAi?: boolean;
     fieldConfirmations?: Array<{ id?: string; field: string; value?: string | number; status?: 'CONFIRMED' | 'UNCERTAIN' }>;
   }): Promise<ProposalAdaptationRunResult> {
     const productCode = sanitizeProductCode(input.productCode);
@@ -189,7 +186,6 @@ export class ProposalOrchestrator {
       pdfA: pdfAAnalysis,
       benchmark: benchmarkAnalysis,
       referenceExtract,
-      useAi: input.useAi,
     });
 
     let proposalDefinition = this.defBuilder.build({
@@ -206,7 +202,6 @@ export class ProposalOrchestrator {
       referenceExtract.scenarios = proposalDefinition.sampleScenarios;
     }
 
-    // Minimal-mutation VB.NET + RDLC 2008 generation
     const vbOut = this.vbGenerator.generate(proposalDefinition, benchmarkAnalysis);
     const rdlcOut = this.rdlcGenerator.generate(
       proposalDefinition,
@@ -286,7 +281,6 @@ export class ProposalOrchestrator {
           benchmarkProductCode: benchmarkAnalysis.productCode,
           pdfAFileName: input.pdfAFileName,
           pdfBFileName: input.pdfBFileName,
-          useAi: input.useAi,
         },
         null,
         2
@@ -315,7 +309,7 @@ export class ProposalOrchestrator {
       testHarness: tested.harnessResult,
       staging,
       usedSkills: diffOut.usedSkills,
-      aiProvider: diffOut.aiProvider,
+      analysisMode: diffOut.analysisMode,
     };
   }
 
@@ -340,7 +334,6 @@ export class ProposalOrchestrator {
       benchmarkProductCode: string;
       pdfAFileName: string;
       pdfBFileName?: string;
-      useAi?: boolean;
     };
 
     const pdfABytes = new Uint8Array(fs.readFileSync(pdfAPath));
@@ -355,7 +348,6 @@ export class ProposalOrchestrator {
       pdfAFileName: meta.pdfAFileName,
       pdfBBytes,
       pdfBFileName: meta.pdfBFileName,
-      useAi: meta.useAi,
       fieldConfirmations: confirmations,
     });
   }

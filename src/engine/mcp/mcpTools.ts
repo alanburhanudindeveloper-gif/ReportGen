@@ -256,7 +256,7 @@ export const MCP_TOOL_CATALOG: McpToolDescriptor[] = [
     riskLevel: 'medium',
     approvalRequired: false,
     handlerName: 'ProposalOrchestrator.runAdaptation',
-    command: 'npm run proposal-cli -- generate --project <dir> --product <CODE> --pdf-a <a.pdf> --no-ai',
+    command: 'npm run proposal-cli -- generate --project <dir> --product <CODE> --pdf-a <a.pdf>',
   },
   {
     name: 'insert_dry_run',

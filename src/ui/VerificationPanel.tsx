@@ -160,11 +160,15 @@ export function VerificationPanel({ result, onVisualDiffUpdated }: VerificationP
 
         {visualDiff && visualDiff.available && (
           <div className="space-y-4 border-t border-slate-200 pt-4">
-            <div className="flex items-center justify-between text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
               <span className="font-medium text-slate-900">
-                Overall Similarity:{' '}
+                Overall Visual Parity:{' '}
                 <span className="font-mono tabular-nums font-semibold">
-                  {(visualDiff.overallSimilarity * 100).toFixed(2)}%
+                  {(visualDiff.overallParityPercent ?? visualDiff.overallSimilarity * 100).toFixed(2)}%
+                </span>{' '}
+                · MAE:{' '}
+                <span className="font-mono tabular-nums font-semibold">
+                  {(visualDiff.meanAbsoluteError ?? 0).toFixed(2)}
                 </span>{' '}
                 (Target: {(visualDiff.targetSimilarity * 100).toFixed(0)}%)
               </span>
@@ -177,7 +181,9 @@ export function VerificationPanel({ result, onVisualDiffUpdated }: VerificationP
                   <div className="flex items-center justify-between text-xs font-mono tabular-nums">
                     <span className="font-semibold text-slate-900">Page {p.page}</span>
                     <span className="text-slate-600">
-                      Similarity: {(p.similarity * 100).toFixed(2)}% · Mismatched pixels: {p.mismatchPixels.toLocaleString()} / {p.totalPixels.toLocaleString()}
+                      Parity: {(p.parityPercent ?? p.similarity * 100).toFixed(2)}% · MAE:{' '}
+                      {(p.meanAbsoluteError ?? 0).toFixed(2)} · Mismatched pixels:{' '}
+                      {p.mismatchPixels.toLocaleString()} / {p.totalPixels.toLocaleString()}
                     </span>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">

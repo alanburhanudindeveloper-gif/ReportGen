@@ -1,17 +1,17 @@
 # ReportGen & Proposal Report Adaptation Engine
 
-An AI-assisted, deterministic-first automation platform for:
+A **100% deterministic, zero-AI** PDF-to-RDLC conversion, verification, and proposal adaptation platform for:
 
-1. **Proposal Report Adaptation (`proposal-cli` & Proposal UI)** — Automates creating new insurance/proposal reports from proven production **VB.NET** + **RDLC 2008** benchmark implementations via **minimal mutation** (`COPY → RENAME → PATCH ONLY REQUIRED PARTS`).
-2. **PDF → RDLC Tablix + VB.NET Conversion Pipeline (`reportgen` CLI & ReportGen Workbench)** — Decomposes uploaded PDF templates into coordinate-clustered RDLC Tablix models, VB.NET logic, test scenarios, and visual diffs without HTML in the conversion pipeline.
+1. **PDF → RDLC 2016 Conversion & Verification Studio (`reportgen` CLI & Conversion Studio UI)** — Decomposes uploaded PDFs into a Dual-Layer Hybrid + Repeating Tablix RDLC 2016 XML layout (`cm` precision, Layer 0 text-stripped backgrounds, fake-bold deduplicated inline `<TextRun>` formatting, auto-bound `<ReportParameters>`, and broken-glyph crop fallbacks), renders previews directly from `.rdlc` XML, and verifies pixel parity against the original PDF.
+2. **Proposal Report Adaptation (`proposal-cli` & Proposal UI)** — Automates creating new insurance/proposal reports from proven production **VB.NET** + **RDLC 2008** benchmark implementations via **minimal mutation** (`COPY → RENAME → PATCH ONLY REQUIRED PARTS`).
 
 ---
 
 ## Core Architectural Principles
 
-- **AI decides WHAT; Deterministic code decides HOW; Existing production code defines WHAT IS ALREADY PROVEN.**
-- **VB.NET & RDLC 2008 Contract**: Existing target `.vb` (`ProposalBuilder.vb`, `ProposalElement.vb`) and `.rdlc` (`http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition`) implementations are preserved (~87–95% reused verbatim) rather than rewritten from scratch or translated into C#.
-- **No HTML Simulation in Production Reports**: Reports target genuine RDLC Tablix XML executed by Microsoft ReportViewer (`LocalReport.Render("PDF")`).
+- **100% Deterministic, Zero-AI Execution**: Every pipeline stage (geometry extraction, Dual-Layer Hybrid + Tablix reconstruction, parameter binding, RDLC XML serialization, VB.NET logic generation, and visual diffing) runs deterministically offline with reproducible SHA-256 outputs and zero external LLM dependencies or API keys.
+- **VB.NET & RDLC Contract**: Core conversion targets strict RDLC 2016 (`http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition`) with `cm` units; Proposal Adaptation preserves existing target `.vb` (`ProposalBuilder.vb`, `ProposalElement.vb`) and `.rdlc` (`2008/01/reportdefinition`) implementations verbatim (~87–95% reused).
+- **True RDLC XML Preview & Visual Parity**: `RdlcVisualPreviewRenderer` parses generated `.rdlc` XML directly, expands repeating Tablix detail rows, evaluates `Code.*` expressions and runtime `ReportParameters`, and exports both interactive HTML sandboxes and downloadable PDFs verified with Ghostscript + `pixelmatch`.
 - **Safe Staging & Human Approval Gate**: Generated artifacts are isolated under `output/<ProductCode>/` and never written into the target repository without passing tests, SHA-256 verification, explicit human approval (`approval.json`), dry-run inspection, and collision protection.
 
 ---
@@ -49,7 +49,7 @@ An AI-assisted, deterministic-first automation platform for:
 
 ```text
 ├── server.ts                          # Express API + Vite dev middleware (port 3000)
-├── reportgen.config.yaml              # Pipeline thresholds, AI model, and path policies
+├── reportgen.config.yaml              # Deterministic pipeline thresholds and path policies
 ├── src/
 │   ├── cli/
 │   │   ├── proposalCli.ts             # proposal-cli (tech-profile, scan, generate, test, approve, insert)
@@ -63,7 +63,7 @@ An AI-assisted, deterministic-first automation platform for:
 │   │   │   ├── projectScanner.ts      # Scanner facade & benchmark ranking
 │   │   │   ├── benchmarkInspector.ts  # SHA-256 cached benchmark inspection
 │   │   │   ├── dummyDataExtractor.ts  # PDF B extraction + provenance
-│   │   │   ├── differentialAnalyzer.ts# PDF A vs benchmark diff + selective Gemini reasoning
+│   │   │   ├── differentialAnalyzer.ts# Deterministic PDF A vs benchmark diff analyzer
 │   │   │   ├── proposalDefinitionBuilder.ts
 │   │   │   ├── minimalMutationPatcher.ts
 │   │   │   ├── rdlc2008Patcher.ts
@@ -72,12 +72,12 @@ An AI-assisted, deterministic-first automation platform for:
 │   │   │   ├── stagingManager.ts
 │   │   │   ├── projectInserter.ts
 │   │   │   └── proposalOrchestrator.ts
-│   │   ├── pdf/                       # PdfAnalyzer + GridReconstructor
-│   │   ├── rdlc/                      # TablixBuilder, RdlcGenerator (2008/2016), RdlcValidator
+│   │   ├── pdf/                       # PdfAnalyzer (Layer 0 stripping + spans) & GridReconstructor
+│   │   ├── rdlc/                      # TablixBuilder, ParameterDetector, RdlcGenerator, RdlcValidator, RdlcVisualPreviewRenderer
 │   │   ├── vb/                        # Deterministic VB helper code generator
 │   │   ├── testing/                   # LogicTestRunner & Ghostscript/pixelmatch VisualDiffEngine
 │   │   └── agent/                     # ReportGenAgent orchestrator
-│   ├── ui/                            # React Workbench & ProposalWorkspace UI
+│   ├── ui/                            # React ConversionStudio, LayoutInspector, ArtifactsPanel & ProposalWorkspace
 │   └── samples/                       # Programmatic PDF fixtures for verification
 ├── samples/SampleProposalProject/     # Sample VB.NET + RDLC 2008 production-style project (MFA, ABC)
 ├── dotnet/
@@ -89,7 +89,8 @@ An AI-assisted, deterministic-first automation platform for:
 │   │   └── vb-runner/                     # Standalone Windows VB.NET LocalReport.Render("PDF") runner
 ├── python/                            # Companion Python PDF/Excel helpers
 └── tests/
-    ├── run-e2e-tests.ts               # Core PDF -> RDLC/VB E2E tests
+    ├── run-agent-contract-tests.ts    # Zero-AI contract & security boundary tests
+    ├── run-e2e-tests.ts               # Core PDF -> RDLC/VB + Visual Parity E2E tests
     └── run-proposal-e2e.ts            # Proposal Adaptation Engine E2E tests
 ```
 
@@ -103,6 +104,7 @@ npm install
 npm run dev
 ```
 Open `http://localhost:3000`:
+- Use **Conversion Studio** for side-by-side Original PDF vs Rendered RDLC comparison, Pixel Diff overlays, Live `ReportParameters` testing, and `.rdlc` / rendered `.pdf` downloads.
 - Switch to **Proposal Adaptation** to scan `samples/SampleProposalProject`, inspect `TechnologyProfile` and AST dependency graphs, run the Two-PDF fixture (or upload custom PDF A / PDF B files), review diff/provenance/scenarios, approve staging, run `--dry-run`, and test controlled project insertion.
 
 ### 2. Proposal CLI (`proposal-cli`)
@@ -135,7 +137,6 @@ npm run proposal-cli -- insert --project samples/SampleProposalProject --generat
 npm run build
 npm run lint
 npx tsx tests/run-agent-contract-tests.ts
-npx tsx tests/run-llm-provider-tests.ts
 npx tsx tests/run-e2e-tests.ts
 npx tsx tests/run-proposal-e2e.ts
 ```
@@ -174,7 +175,9 @@ output/<PRODUCT>/
 
 ## API Endpoints (`server.ts`)
 
-- `GET /api/health` — Service & configured LLM provider status (zero credentials exposed)
+- `GET /api/health` — Deterministic engine status and tool availability
+- `POST /api/pipeline/run` — Execute PDF → RDLC 2016 conversion, XML preview render, and visual parity check
+- `POST /api/pipeline/preview-render` — Re-render `.rdlc` XML with live `ReportParameters` overrides
 - `POST /api/proposal/tech-profile` — Phase 2 `TechnologyProfile` inspection
 - `POST /api/proposal/catalog` — `ReportGen.Project.Scanner` deterministic `.vbproj`/`.csproj` & `ProposalBuilder.vb` catalog
 - `POST /api/proposal/scan` — Phase 1 + 2 project scan, parsed projects & dependency graph
@@ -188,6 +191,6 @@ output/<PRODUCT>/
 
 ## Environment Notes & Limitations
 
-- **VS Code Agent Mode (Default)**: `reportgen.config.yaml` defaults `ai.provider` to `none` so ReportGen never requests personal API keys or silently dials external LLM APIs. When opened in VS Code / Visual Studio, `.github/copilot-instructions.md`, `AGENTS.md`, and `.vscode/tasks.json` govern Agent consent, read-only vs approval-gated tools, and untrusted document boundaries. Optional runtime LLM providers (`gemini`, `openai`, `openai-compatible`, `claude`) are opt-in via `.env` or `LLM_PROVIDER`.
+- **100% Offline Deterministic Execution**: ReportGen contains zero AI/LLM SDKs or API calls and executes completely offline without environment API keys.
 - In Linux containers without `dotnet`, `msbuild`, `vbc`, or Windows Microsoft ReportViewer installed, `TechnologyProfile` sets `compilerAvailableInEnvironment: false` and ReportViewer rendering honestly reports `NOT_VERIFIED_IN_ENVIRONMENT` (`"Rendering not verified in this environment."`).
 - To compile and execute `LocalReport.Render("PDF")` on Windows with .NET 8 SDK installed, run the companion project under `dotnet/vb-runner/ReportViewerRunner.vbproj`.

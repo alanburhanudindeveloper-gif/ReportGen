@@ -537,7 +537,7 @@ export interface ProposalAdaptationRunResult {
   testHarness: ReportTestHarnessResult;
   staging: StagingWorkspaceSummary;
   usedSkills: string[];
-  aiProvider: string;
+  analysisMode: 'deterministic';
 }
 
 // Section 39 Clean Domain Interfaces

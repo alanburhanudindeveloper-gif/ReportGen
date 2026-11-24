@@ -250,7 +250,7 @@ export function ArtifactsPanel({ result, initialTab }: ArtifactsPanelProps) {
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-slate-300 bg-white text-slate-800 rounded-md hover:bg-slate-50 whitespace-nowrap shrink-0"
             >
               <ShieldCheck className="w-3.5 h-3.5" />
-              {validating ? 'Validating...' : 'Validate RDLC (10-Point)'}
+              {validating ? 'Validating...' : `Validate RDLC (${validationState.checkedRules || 15}-Point)`}
             </button>
           )}
           {activeTab === 'preview' && (
@@ -286,7 +286,7 @@ export function ArtifactsPanel({ result, initialTab }: ArtifactsPanelProps) {
       <div className="bg-white border border-slate-200 rounded-lg p-4 flex flex-wrap items-center justify-between gap-4">
         <div>
           <p className="text-xs font-semibold text-slate-900">
-            10-Point RDLC Validation Gate:{' '}
+            {validationState.checkedRules || 15}-Point RDLC Validation Gate:{' '}
             <span className={validationState.valid ? 'text-emerald-700' : 'text-red-700'}>
               {validationState.valid ? 'PASS' : 'FAIL'}
             </span>

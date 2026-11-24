@@ -1,9 +1,3 @@
-import { LLMGateway } from '../ai/llmGateway.ts';
-import {
-  buildDiffRefinementPrompt,
-  DiffRefinementDecision,
-  validateDiffRefinementResponse,
-} from '../ai/prompts.ts';
 import { ReportGenConfig } from '../core/config.ts';
 import { StructuredLogger } from '../core/types.ts';
 import { SkillManager } from '../skills/skillManager.ts';
@@ -20,8 +14,8 @@ function normalizeToken(text: string): string {
 }
 
 function resolveTier(confidence: number, config: ReportGenConfig): ConfidenceTier {
-  if (confidence >= config.ai.confidenceTiers.high) return 'HIGH';
-  if (confidence >= config.ai.confidenceTiers.medium) return 'MEDIUM';
+  if (confidence >= config.validation.confidenceTiers.high) return 'HIGH';
+  if (confidence >= config.validation.confidenceTiers.medium) return 'MEDIUM';
   return 'LOW';
 }
 
@@ -29,18 +23,15 @@ export class DifferentialAnalyzer {
   private readonly logger: StructuredLogger;
   private readonly skillManager: SkillManager;
   private readonly config: ReportGenConfig;
-  private readonly gateway: LLMGateway;
 
   constructor(
     logger: StructuredLogger,
     skillManager: SkillManager,
-    config: ReportGenConfig,
-    gateway?: LLMGateway
+    config: ReportGenConfig
   ) {
     this.logger = logger;
     this.skillManager = skillManager;
     this.config = config;
-    this.gateway = gateway ?? new LLMGateway({ logger, config });
   }
 
   public async analyze(input: {
@@ -48,8 +39,7 @@ export class DifferentialAnalyzer {
     pdfA: TemplateAnalysis;
     benchmark: BenchmarkAnalysis;
     referenceExtract?: ReferenceDataExtract;
-    useAi?: boolean;
-  }): Promise<{ changes: ModificationChange[]; usedSkills: string[]; aiProvider: string }> {
+  }): Promise<{ changes: ModificationChange[]; usedSkills: string[]; analysisMode: 'deterministic' }> {
     const skills = this.skillManager.retrieveRelevantSkills({
       taskType: 'proposal-adaptation',
       hasFinancialTerms: true,
@@ -60,91 +50,16 @@ export class DifferentialAnalyzer {
 
     const deterministic = this.buildDeterministicDiff(input);
 
-    const useAi = input.useAi !== false && this.config.ai.enabled && this.gateway.isAvailable();
-    if (!useAi || deterministic.length === 0) {
-      this.logger.info('DifferentialAnalyzer', 'Completed deterministic differential analysis', {
-        changes: deterministic.length,
-        requiresReview: deterministic.filter((c) => c.requiresReview).length,
-      });
-      return {
-        changes: deterministic,
-        usedSkills: skills.map((s) => s.name),
-        aiProvider: 'deterministic-only',
-      };
-    }
+    this.logger.info('DifferentialAnalyzer', 'Completed deterministic differential analysis', {
+      changes: deterministic.length,
+      requiresReview: deterministic.filter((c) => c.requiresReview).length,
+    });
 
-    const ambiguousChanges = deterministic.filter((c) => c.tier !== 'HIGH');
-    if (ambiguousChanges.length === 0) {
-      return {
-        changes: deterministic,
-        usedSkills: skills.map((s) => s.name),
-        aiProvider: 'deterministic-high-confidence',
-      };
-    }
-
-    try {
-      const skillRules = skills
-        .map((s) => `${s.name}: ${s.rules.slice(0, 3).join(' | ')}`)
-        .join('\n');
-
-      const request = buildDiffRefinementPrompt({
-        productCode: input.productCode,
-        benchmarkProductCode: input.benchmark.productCode,
-        benchmarkElements: input.benchmark.elements.map((e) => e.symbolName),
-        ambiguousChanges: ambiguousChanges.map((c) => ({
-          changeId: c.changeId,
-          decision: c.decision,
-          targetElement: c.targetElement,
-          benchmarkElement: c.benchmarkElement,
-          reason: c.reason,
-        })),
-        referenceFields: (input.referenceExtract?.fields ?? []).slice(0, 15).map((f) => ({
-          field: f.field,
-          value: f.value,
-          isStatusField: f.isStatusField,
-        })),
-        skillRules,
-      });
-
-      const allowedIds = new Set(ambiguousChanges.map((c) => c.changeId));
-      const { response, validated } = await this.gateway.execute<DiffRefinementDecision[]>(
-        request,
-        (parsed) => validateDiffRefinementResponse(allowedIds, parsed)
-      );
-
-      const map = new Map(validated.map((r) => [r.changeId, r]));
-
-      const merged = deterministic.map((c) => {
-        const ref = map.get(c.changeId);
-        if (!ref) return c;
-        const conf = Math.max(0, Math.min(1, Number(ref.confidence) || c.confidence));
-        const tier = resolveTier(conf, this.config);
-        return {
-          ...c,
-          decision: ref.decision,
-          benchmarkElement: ref.benchmarkElement ?? c.benchmarkElement,
-          confidence: conf,
-          tier,
-          requiresReview: tier !== 'HIGH',
-          reason: ref.reason,
-        };
-      });
-
-      return {
-        changes: merged,
-        usedSkills: skills.map((s) => s.name),
-        aiProvider: `${response.provider}:${response.model}`,
-      };
-    } catch (err) {
-      this.logger.warn('DifferentialAnalyzer', 'AI differential refinement fell back to deterministic', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return {
-        changes: deterministic,
-        usedSkills: skills.map((s) => s.name),
-        aiProvider: 'deterministic-fallback',
-      };
-    }
+    return {
+      changes: deterministic,
+      usedSkills: skills.map((s) => s.name),
+      analysisMode: 'deterministic',
+    };
   }
 
   private buildDeterministicDiff(input: {
@@ -162,11 +77,14 @@ export class DifferentialAnalyzer {
         (r) =>
           r.type === 'text' &&
           r.text &&
-          (r.style.bold || r.semanticRole === 'sectionHeading' || r.semanticRole === 'tableHeader' || /summary|schedule|illustration|rider|disclaimer|benefit|cover/i.test(r.text))
+          (r.style.bold ||
+            r.semanticRole === 'sectionHeading' ||
+            r.semanticRole === 'tableHeader' ||
+            /summary|schedule|illustration|rider|disclaimer|benefit|cover/i.test(r.text))
       )
     );
 
-    const uniqueTargets = new Map<string, typeof pdfHeadingsAndSections[number]>();
+    const uniqueTargets = new Map<string, (typeof pdfHeadingsAndSections)[number]>();
     for (const reg of pdfHeadingsAndSections) {
       const cleaned = reg.text!.trim().slice(0, 60);
       const key = normalizeToken(cleaned);
@@ -211,7 +129,6 @@ export class DifferentialAnalyzer {
         continue;
       }
 
-      // Fuzzy match if partial word overlap
       const partialBench = input.benchmark.elements.find((el) => {
         const words = el.labelHint.toLowerCase().split(/\s+/).filter((w) => w.length >= 4);
         return words.some((w) => label.toLowerCase().includes(w));
@@ -256,14 +173,16 @@ export class DifferentialAnalyzer {
             bbox: { x: reg.x, y: reg.y, width: reg.width, height: reg.height },
           },
           reason: `New section "${label}" detected in PDF A with no equivalent in benchmark ${input.benchmark.productCode}.`,
-          changes: [`Add ${cleanSym} in ${input.productCode}ProposalElement.vb`, `Add corresponding Tablix band in ${input.productCode}ProposalLayout.rdlc`],
+          changes: [
+            `Add ${cleanSym} in ${input.productCode}ProposalElement.vb`,
+            `Add corresponding Tablix band in ${input.productCode}ProposalLayout.rdlc`,
+          ],
           generatedFile: `${input.productCode}ProposalElement.vb`,
           generatedSymbol: cleanSym,
         });
       }
     }
 
-    // Track status/data fields extracted from PDF B that introduce bindings
     for (const f of (input.referenceExtract?.fields ?? []).filter((x) => x.isStatusField)) {
       const confidence = f.confidence;
       const tier = resolveTier(confidence, this.config);
@@ -289,7 +208,6 @@ export class DifferentialAnalyzer {
       });
     }
 
-    // Benchmark elements not found in PDF A -> REMOVE / mark obsolete
     for (const el of input.benchmark.elements) {
       if (!matchedBenchmarkElements.has(el.symbolName)) {
         const confidence = 0.66;

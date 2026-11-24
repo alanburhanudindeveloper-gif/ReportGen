@@ -5,7 +5,6 @@ import multer from 'multer';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { ReportGenAgent } from './src/engine/agent/reportGenAgent.ts';
-import { LLMGateway } from './src/engine/ai/llmGateway.ts';
 import { loadConfig, resolveSafeSubpath } from './src/engine/core/config.ts';
 import { ReportGenError, StructuredLogger } from './src/engine/core/types.ts';
 import { createReportGenServices, MCP_TOOL_CATALOG } from './src/engine/mcp/mcpTools.ts';
@@ -37,18 +36,12 @@ async function startServer() {
   app.use(express.json({ limit: '50mb' }));
 
   app.get('/api/health', (_req, res) => {
-    const config = loadConfig();
-    const logger = new StructuredLogger(false);
-    const gateway = new LLMGateway({ logger, config });
-    const llm = gateway.getStatus();
-    res.json({ ok: true, service: 'ReportGen', llm });
+    res.json({ ok: true, service: 'ReportGen', engineMode: 'deterministic-zero-ai' });
   });
 
   app.get('/api/config', (_req, res) => {
     const config = loadConfig();
-    const logger = new StructuredLogger(false);
-    const llmStatus = new LLMGateway({ logger, config }).getStatus();
-    res.json({ ...config, llmStatus });
+    res.json({ ...config, engineMode: 'deterministic-zero-ai' });
   });
 
   app.get('/api/mcp/tools', (_req, res) => {
@@ -107,7 +100,6 @@ async function startServer() {
       try {
         const files = (req.files ?? {}) as Record<string, Express.Multer.File[]>;
         const useFixture = req.body?.useFixture === 'true';
-        const useAi = req.body?.useAi !== 'false';
 
         let pdfBytes: Uint8Array;
         let documentName: string;
@@ -158,7 +150,6 @@ async function startServer() {
           existingVbFileName,
           excelBytes,
           comparisonPdfBytes,
-          useAi,
         });
 
         return res.json(result);
@@ -204,24 +195,94 @@ async function startServer() {
 
   app.post('/api/pipeline/preview-pdf', async (req, res) => {
     try {
-      const { rdlcXml, title, filename, sampleFields } = (req.body ?? {}) as {
+      const { rdlcXml, title, filename, sampleFields, parameterOverrides } = (req.body ?? {}) as {
         rdlcXml?: string;
         title?: string;
         filename?: string;
         sampleFields?: Record<string, unknown>;
+        parameterOverrides?: Record<string, string>;
       };
       if (!rdlcXml || typeof rdlcXml !== 'string') {
         return res.status(400).json({ error: 'rdlcXml string is required' });
       }
       const config = loadConfig();
       const services = createReportGenServices(config, false);
-      const pdfBytes = await services.rdlcPreviewRenderer.renderPdf(rdlcXml, { title, sampleFields });
+      const pdfBytes = await services.rdlcPreviewRenderer.renderPdf(rdlcXml, {
+        title,
+        sampleFields,
+        parameterOverrides,
+      });
       const safeBase = String(filename || title || 'rdlc-preview')
         .replace(/\.pdf$/i, '')
         .replace(/[^A-Za-z0-9._-]+/g, '_');
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename="${safeBase}.pdf"`);
       return res.send(Buffer.from(pdfBytes));
+    } catch (err) {
+      return res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post('/api/pipeline/preview-render', async (req, res) => {
+    try {
+      const { rdlcXml, title, sampleFields, parameterOverrides, originalPdfBase64, dpi } = (req.body ?? {}) as {
+        rdlcXml?: string;
+        title?: string;
+        sampleFields?: Record<string, unknown>;
+        parameterOverrides?: Record<string, string>;
+        originalPdfBase64?: string;
+        dpi?: number;
+      };
+      if (!rdlcXml || typeof rdlcXml !== 'string') {
+        return res.status(400).json({ error: 'rdlcXml string is required' });
+      }
+      const config = loadConfig();
+      const services = createReportGenServices(config, false);
+      const targetDpi = typeof dpi === 'number' && dpi >= 72 && dpi <= 300 ? dpi : config.pdf.dpi;
+
+      const htmlPreview = services.rdlcPreviewRenderer.renderHtml(rdlcXml, {
+        title,
+        sampleFields,
+        parameterOverrides,
+      });
+      const renderedPdfBytes = await services.rdlcPreviewRenderer.renderPdf(rdlcXml, {
+        title,
+        sampleFields,
+        parameterOverrides,
+      });
+      const renderedBuffers = await services.visualDiff.rasterizePdf(renderedPdfBytes, targetDpi);
+      const renderedPagesBase64 = renderedBuffers.map((b) => b.toString('base64'));
+      const parameters = services.rdlcPreviewRenderer.extractParameters(rdlcXml);
+
+      let parityReport;
+      let originalPagesBase64: string[] | undefined;
+      if (originalPdfBase64 && typeof originalPdfBase64 === 'string') {
+        const cleanB64 = originalPdfBase64.replace(/^data:[^;]+;base64,/, '');
+        const origBytes = new Uint8Array(Buffer.from(cleanB64, 'base64'));
+        parityReport = await services.visualDiff.comparePdfs(
+          origBytes,
+          renderedPdfBytes,
+          config.validation.visualSimilarityTarget,
+          undefined,
+          targetDpi
+        );
+        originalPagesBase64 = parityReport.pages
+          .map((p) => p.originalImageBase64)
+          .filter((s): s is string => Boolean(s));
+      }
+
+      return res.json({
+        html: htmlPreview.html,
+        pageCount: htmlPreview.pageCount,
+        pageWidth: htmlPreview.pageWidth,
+        pageHeight: htmlPreview.pageHeight,
+        stats: htmlPreview.stats,
+        collisions: htmlPreview.collisions,
+        parameters,
+        renderedPagesBase64,
+        originalPagesBase64,
+        parityReport,
+      });
     } catch (err) {
       return res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -474,7 +535,6 @@ async function startServer() {
       try {
         const files = (req.files ?? {}) as Record<string, Express.Multer.File[]>;
         const useFixture = req.body?.useFixture === 'true';
-        const useAi = req.body?.useAi !== 'false';
         const productCode = String(req.body?.productCode || 'EGA');
         const planCode = String(req.body?.planCode || `${productCode}-EXEC-2026`);
         const benchmarkProductCode = req.body?.benchmarkProductCode
@@ -517,7 +577,6 @@ async function startServer() {
           pdfAFileName,
           pdfBBytes,
           pdfBFileName,
-          useAi,
         });
 
         return res.json(result);

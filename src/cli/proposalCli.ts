@@ -49,7 +49,7 @@ Commands (READ_ONLY):
 
 Commands (PROPOSAL / VALIDATION):
   generate --project <dir> --product <CODE> [--plan <PLAN>] [--benchmark <CODE>]
-           [--pdf-a <template.pdf>] [--pdf-b <reference.pdf>] [--no-ai] [--fixture]
+           [--pdf-a <template.pdf>] [--pdf-b <reference.pdf>] [--fixture]
       Analyze PDF A (+ PDF B), diff against benchmark, run Report Test Harness & DiagnosisAgent,
       and write staged artifacts into output/<CODE>/ (never writes into target project).
 
@@ -183,7 +183,6 @@ async function main() {
     const pdfAPath = getArg(argv, '--pdf-a');
     const pdfBPath = getArg(argv, '--pdf-b');
     const useFixture = hasFlag(argv, '--fixture') || !pdfAPath;
-    const useAi = !hasFlag(argv, '--no-ai');
 
     const pdfABytes = useFixture
       ? await buildProposalTemplatePdfA()
@@ -207,7 +206,6 @@ async function main() {
       pdfAFileName,
       pdfBBytes,
       pdfBFileName,
-      useAi,
     });
 
     console.log(

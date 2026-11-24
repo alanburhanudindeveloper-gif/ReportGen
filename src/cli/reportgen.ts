@@ -15,7 +15,7 @@ Usage:
   reportgen tools [--category <READ_ONLY|VALIDATION|PROPOSAL|MUTATION>]
   reportgen analyze <input.pdf> [--out <layout.json>] [--stdout]
   reportgen inspect [--rdlc <file.rdlc>] [--vb <file.vb>] [--excel <file.xlsx>]
-  reportgen generate <input.pdf> [--project <dir>] [--output <relDir>] [--existing-rdlc <file>] [--existing-vb <file>] [--excel <file>] [--no-ai] [--dry-run] [--force]
+  reportgen generate <input.pdf> [--project <dir>] [--output <relDir>] [--existing-rdlc <file>] [--existing-vb <file>] [--excel <file>] [--dry-run] [--force]
   reportgen preview <outputDir>
   reportgen render-preview <outputDirOrRdlcFile> [--out <preview.html>] [--stdout]
   reportgen render-pdf <outputDirOrRdlcFile> [--out <preview.pdf>]
@@ -171,7 +171,6 @@ async function main(): Promise<void> {
     const excelPath = getFlagValue(args, '--excel');
     const force = args.includes('--force');
     const dryRun = args.includes('--dry-run');
-    const useAi = !args.includes('--no-ai');
 
     const agent = new ReportGenAgent(services);
     const result = await agent.execute({
@@ -182,7 +181,6 @@ async function main(): Promise<void> {
       existingVbSource: existingVbPath ? fs.readFileSync(existingVbPath, 'utf-8') : undefined,
       existingVbFileName: existingVbPath ? path.basename(existingVbPath) : undefined,
       excelBytes: excelPath ? fs.readFileSync(excelPath) : undefined,
-      useAi,
     });
 
     if (dryRun) {
@@ -192,8 +190,16 @@ async function main(): Promise<void> {
             dryRun: true,
             documentName: result.documentName,
             reportName: result.reportDefinition.reportName,
+            rdlcSha256: result.rdlcSha256,
             finalized: result.finalized,
             rdlcValidation: result.rdlcValidation,
+            visualDiff: result.visualDiff
+              ? {
+                  available: result.visualDiff.available,
+                  overallParityPercent: result.visualDiff.overallParityPercent,
+                  meanAbsoluteError: result.visualDiff.meanAbsoluteError,
+                }
+              : undefined,
             logicTests: {
               status: result.logicTests.status,
               passed: result.logicTests.passed,

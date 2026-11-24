@@ -137,6 +137,10 @@ export class ExcelOracleReader {
       ],
     };
 
+    if (definition.sampleDetailRows && definition.sampleDetailRows.length > 0) {
+      dummy.detailRows = definition.sampleDetailRows;
+    }
+
     return dummy;
   }
 }

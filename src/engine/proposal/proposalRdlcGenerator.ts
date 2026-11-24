@@ -122,7 +122,7 @@ export class ProposalRdlcGenerator {
     const clonedLayout: IntermediateLayoutModel = JSON.parse(JSON.stringify(pdfALayout));
     const reconstructedLayout = this.gridReconstructor.reconstruct(clonedLayout, 0.04);
 
-    const builtDef = this.tablixBuilder.buildReportDefinition(reconstructedLayout, undefined, {
+    const builtDef = this.tablixBuilder.buildReportDefinition(reconstructedLayout, {
       sourceFiles: [bench],
       dataSourceName: definition.dataSourceName,
       dataSetName: definition.dataSetName,

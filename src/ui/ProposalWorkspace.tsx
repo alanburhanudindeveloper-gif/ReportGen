@@ -29,7 +29,6 @@ export function ProposalWorkspace() {
   const [planCode, setPlanCode] = useState('EGA-EXEC-2026');
   const [pdfAFile, setPdfAFile] = useState<File | null>(null);
   const [pdfBFile, setPdfBFile] = useState<File | null>(null);
-  const [useAi, setUseAi] = useState(true);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,7 +81,6 @@ export function ProposalWorkspace() {
     try {
       const form = new FormData();
       form.append('useFixture', String(useFixture));
-      form.append('useAi', String(useAi));
       form.append('projectRoot', projectRoot);
       form.append('productCode', productCode);
       form.append('planCode', planCode);
@@ -490,16 +488,6 @@ export function ProposalWorkspace() {
               />
             </div>
           </div>
-
-          <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={useAi}
-              onChange={(e) => setUseAi(e.target.checked)}
-              className="rounded border-slate-300"
-            />
-            Use configured AI provider for ambiguous layout diffs &amp; status field reasoning (falls back deterministically when disabled/offline)
-          </label>
 
           <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-3 text-xs">

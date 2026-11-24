@@ -138,7 +138,6 @@ async function runProposalE2E() {
     pdfAFileName: 'EGA-Template-PDFA.pdf',
     pdfBBytes,
     pdfBFileName: 'Reference-System-PDFB.pdf',
-    useAi: false,
   });
 
   // Verify structured staging folders and all staged files exist

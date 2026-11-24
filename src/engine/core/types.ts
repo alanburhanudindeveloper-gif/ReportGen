@@ -1,7 +1,6 @@
 export enum ReportGenErrorCode {
   PDF_ANALYSIS_FAILED = 'PDF_ANALYSIS_FAILED',
   LAYOUT_RECONSTRUCTION_FAILED = 'LAYOUT_RECONSTRUCTION_FAILED',
-  AI_DECISION_INVALID = 'AI_DECISION_INVALID',
   RDLC_GENERATION_FAILED = 'RDLC_GENERATION_FAILED',
   VB_GENERATION_FAILED = 'VB_GENERATION_FAILED',
   LOGIC_TEST_FAILED = 'LOGIC_TEST_FAILED',
@@ -118,18 +117,31 @@ export interface RegionStyle {
   fontSizePt: number;
   bold: boolean;
   italic: boolean;
+  underline?: boolean;
   color: string;
   backgroundColor?: string;
   borderColor?: string;
   borderWidthPt?: number;
   textAlign: 'Left' | 'Center' | 'Right';
   verticalAlign: 'Top' | 'Middle' | 'Bottom';
+  lineHeightPt?: number;
   paddingPt: {
     top: number;
     right: number;
     bottom: number;
     left: number;
   };
+}
+
+export interface VisualTextRun {
+  text: string;
+  fontFamily: string;
+  fontSizePt: number;
+  bold: boolean;
+  italic: boolean;
+  underline?: boolean;
+  color: string;
+  parameterName?: string;
 }
 
 export interface LayoutRegion {
@@ -141,6 +153,7 @@ export interface LayoutRegion {
   width: number;
   height: number;
   text?: string;
+  runs?: VisualTextRun[];
   style: RegionStyle;
   semanticRole: SemanticRole;
   confidence: number;
@@ -192,6 +205,10 @@ export interface LayoutPage {
   regions: LayoutRegion[];
   bands: ReconstructedBand[];
   rasterPreviewBase64?: string;
+  layer0BackgroundBase64?: string;
+  layer0ImageName?: string;
+  brokenGlyphRegions?: number;
+  deduplicatedSpans?: number;
 }
 
 export interface IntermediateLayoutModel {
@@ -206,10 +223,14 @@ export interface IntermediateLayoutModel {
   pages: LayoutPage[];
 }
 
+export type TablixArchetype = 'A' | 'B' | 'C' | 'D';
+
 export interface TablixTextboxContent {
   kind: 'Textbox';
   name: string;
   value: string;
+  runs?: VisualTextRun[];
+  paragraphLines?: VisualParagraphSpec[];
   isExpression: boolean;
   style: RegionStyle;
   canGrow: boolean;
@@ -229,7 +250,29 @@ export interface TablixEmptyContent {
   style?: Partial<RegionStyle>;
 }
 
-export type TablixCellContent = TablixTextboxContent | TablixImageContent | TablixEmptyContent;
+export interface TablixNestedContent {
+  kind: 'Tablix';
+  name: string;
+  tablix: TablixRegion;
+  style?: Partial<RegionStyle>;
+}
+
+export interface TablixRectangleContent {
+  kind: 'Rectangle';
+  name: string;
+  style?: Partial<RegionStyle>;
+  rectangles: VisualRectItem[];
+  images: VisualImageItem[];
+  textboxes: VisualTextboxItem[];
+  tablixes: TablixRegion[];
+}
+
+export type TablixCellContent =
+  | TablixTextboxContent
+  | TablixImageContent
+  | TablixEmptyContent
+  | TablixNestedContent
+  | TablixRectangleContent;
 
 export interface TablixCell {
   colIndex: number;
@@ -243,6 +286,7 @@ export interface TablixCell {
 export interface TablixRow {
   heightIn: number;
   isDetailRow: boolean;
+  pageBreakBefore?: boolean;
   cells: TablixCell[];
 }
 
@@ -251,6 +295,10 @@ export interface TablixRegion {
   name: string;
   pageNumber: number;
   bandKind: BandKind;
+  archetype?: TablixArchetype;
+  slug?: string;
+  pageBreakBefore?: boolean;
+  keepTogether?: boolean;
   topIn: number;
   leftIn: number;
   widthIn: number;
@@ -259,6 +307,7 @@ export interface TablixRegion {
   isRepeatingDetail: boolean;
   columnWidthsIn: number[];
   rows: TablixRow[];
+  zIndex?: number;
 }
 
 export interface ReportFieldDef {
@@ -274,6 +323,8 @@ export interface ReportParameterDef {
   dataType: 'String' | 'Integer' | 'Float' | 'DateTime' | 'Boolean';
   prompt: string;
   defaultValue?: string;
+  matchedPattern?: string;
+  pageNumber?: number;
 }
 
 export interface CalculationRuleDef {
@@ -295,6 +346,17 @@ export interface VisualRectItem {
   backgroundColor?: string;
   borderColor?: string;
   borderWidthPt?: number;
+  zIndex?: number;
+  role?: 'section' | 'leftColumn' | 'rightColumn' | 'headerBand' | 'footerBand' | 'fill' | 'line' | 'pageContainer';
+  pageNumber?: number;
+  pageBreakLocation?: 'Start' | 'End';
+  keepTogether?: boolean;
+  children?: {
+    rectangles: VisualRectItem[];
+    images: VisualImageItem[];
+    textboxes: VisualTextboxItem[];
+    tablixes: TablixRegion[];
+  };
 }
 
 export interface VisualImageItem {
@@ -306,6 +368,13 @@ export interface VisualImageItem {
   widthIn: number;
   heightIn: number;
   sizing: 'FitProportional' | 'Fit' | 'Clip';
+  zIndex?: number;
+}
+
+export interface VisualParagraphSpec {
+  runs: VisualTextRun[];
+  lineHeightPt?: number;
+  textAlign?: 'Left' | 'Center' | 'Right';
 }
 
 export interface VisualTextboxItem {
@@ -316,7 +385,11 @@ export interface VisualTextboxItem {
   widthIn: number;
   heightIn: number;
   text: string;
+  runs?: VisualTextRun[];
+  paragraphLines?: VisualParagraphSpec[];
   style: RegionStyle;
+  canGrow?: boolean;
+  zIndex?: number;
 }
 
 export interface VisualPageLayer {
@@ -327,6 +400,64 @@ export interface VisualPageLayer {
   images: VisualImageItem[];
   textboxes: VisualTextboxItem[];
   tablixes: TablixRegion[];
+}
+
+export interface RdlcBandContainerSpec {
+  kind: 'PageHeader' | 'PageFooter';
+  heightIn: number;
+  printOnFirstPage?: boolean;
+  printOnLastPage?: boolean;
+  rectangles: VisualRectItem[];
+  images: VisualImageItem[];
+  textboxes: VisualTextboxItem[];
+  tablixes: TablixRegion[];
+}
+
+export interface LayoutSectionSummary {
+  name: string;
+  slug: string;
+  pageNumber: number;
+  pageBreakStart: boolean;
+  topIn: number;
+  leftIn: number;
+  widthIn: number;
+  heightIn: number;
+  layoutType:
+    | 'Single-Column'
+    | 'Dual-Column'
+    | 'Multi-Column'
+    | 'Tablix'
+    | 'Clause-List'
+    | 'Hybrid-Callout';
+  archetype?: TablixArchetype;
+  rowCount?: number;
+  colCount?: number;
+  hasNestedTablixes?: boolean;
+  columnCount?: number;
+  hasHeaderBand: boolean;
+  hasLeftColumn: boolean;
+  hasRightColumn: boolean;
+  hasFooterBand: boolean;
+  childItemCount: number;
+}
+
+export interface RdlcDocumentHierarchy {
+  mode: 'v3-full-tablix-single-rdlc' | 'v2-hierarchical-single-rdlc';
+  pageHeader?: {
+    heightIn: number;
+    printOnFirstPage: boolean;
+    printOnLastPage: boolean;
+    assetCount: number;
+    textLabels: string[];
+  };
+  pageFooter?: {
+    heightIn: number;
+    printOnFirstPage: boolean;
+    printOnLastPage: boolean;
+    assetCount: number;
+    textLabels: string[];
+  };
+  sections: LayoutSectionSummary[];
 }
 
 export interface ReportDefinition {
@@ -348,45 +479,12 @@ export interface ReportDefinition {
   embeddedImages: Array<{ name: string; mimeType: string; base64Data: string }>;
   existingPatternUsed?: string;
   visualPages?: VisualPageLayer[];
-}
-
-export interface AiAmbiguousRegionSlice {
-  regionId: string;
-  pageNumber: number;
-  text: string;
-  bandHint: BandKind;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  fontSizePt: number;
-  bold: boolean;
-  hasBoxBorder: boolean;
-  ambiguityReason: string;
-  nearbyLabels: string[];
-}
-
-export interface AiDecisionItem {
-  regionId: string;
-  semanticRole: SemanticRole;
-  linkedField?: string;
-  bandOverride?: BandKind;
-  preferImageFallback?: boolean;
-  calculationHint?: string;
-  confidence: number;
-  rationale: string;
-}
-
-export interface AiDecisionResponse {
-  provider: string;
-  model: string;
-  usedSkills: string[];
-  tokenEstimate: {
-    sentRegions: number;
-    totalRegions: number;
-    reductionPercent: number;
-  };
-  decisions: AiDecisionItem[];
+  pageHeaderSpec?: RdlcBandContainerSpec;
+  pageFooterSpec?: RdlcBandContainerSpec;
+  bodyTablixes?: TablixRegion[];
+  bodySections?: VisualRectItem[];
+  hierarchy?: RdlcDocumentHierarchy;
+  sampleDetailRows?: Array<Record<string, string | number>>;
 }
 
 export interface ExistingProjectPattern {
@@ -448,6 +546,8 @@ export interface LogicTestSummary {
 export interface VisualDiffPageResult {
   page: number;
   similarity: number;
+  parityPercent: number;
+  meanAbsoluteError: number;
   mismatchPixels: number;
   totalPixels: number;
   diffImageBase64?: string;
@@ -459,6 +559,8 @@ export interface VisualDiffReport {
   available: boolean;
   targetSimilarity: number;
   overallSimilarity: number;
+  overallParityPercent: number;
+  meanAbsoluteError: number;
   note: string;
   pages: VisualDiffPageResult[];
 }
@@ -471,20 +573,40 @@ export interface RenderStatus {
   renderedPdfPath?: string;
 }
 
+export interface ConversionMetrics {
+  textboxes: number;
+  tablixes: number;
+  nestedTablixes?: number;
+  layer0Pages: number;
+  glyphFallbacks: number;
+  deduplicatedFakeBold: number;
+  parameters: number;
+  sectionsCount?: number;
+  dualColumnSections?: number;
+  printOnFirstPage?: boolean;
+  nativeHeaderPresent?: boolean;
+  nativeFooterPresent?: boolean;
+  archetypes?: { A: number; B: number; C: number; D: number };
+  collisionsCount?: number;
+  renderedPageCount?: number;
+}
+
 export interface PipelineRunResult {
   runId: string;
   documentName: string;
   layoutModel: IntermediateLayoutModel;
   existingPattern?: ExistingProjectPattern;
-  aiResult?: AiDecisionResponse;
   reportDefinition: ReportDefinition;
   rdlcXml: string;
+  rdlcSha256: string;
+  rdlcSchemaVersion: '2016';
   vbCode: string;
   dummyJson: Record<string, unknown>;
   rdlcValidation: RdlcValidationResult;
   logicTests: LogicTestSummary;
   renderStatus: RenderStatus;
   visualDiff?: VisualDiffReport;
+  conversionMetrics: ConversionMetrics;
   logs: LogEntry[];
   finalized: boolean;
   agentIterations: number;

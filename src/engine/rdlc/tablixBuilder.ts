@@ -1,5 +1,5 @@
+import crypto from 'crypto';
 import {
-  AiDecisionResponse,
   CalculationRuleDef,
   ExistingProjectPattern,
   IntermediateLayoutModel,
@@ -18,7 +18,10 @@ import {
   VisualPageLayer,
   VisualRectItem,
   VisualTextboxItem,
+  VisualTextRun,
 } from '../core/types.ts';
+import { createParameterDetectionContext, parameterizeTextRuns } from './parameterDetector.ts';
+import { V3TablixCompiler } from './v3TablixCompiler.ts';
 
 function sanitizeIdentifier(raw: string, fallback: string): string {
   const cleaned = raw
@@ -48,22 +51,14 @@ export class TablixBuilder {
 
   public buildReportDefinition(
     layout: IntermediateLayoutModel,
-    aiDecisions?: AiDecisionResponse,
     existingPattern?: ExistingProjectPattern
   ): ReportDefinition {
-    const decisionMap = new Map(
-      (aiDecisions?.decisions ?? []).map((d) => [d.regionId, d])
-    );
-
     const dataSourceName = existingPattern?.dataSourceName ?? 'dsReportSource';
     const dataSetName = existingPattern?.dataSetName ?? 'dsReportData';
     const reportName = sanitizeIdentifier(layout.document.name, 'GeneratedReport');
 
     const fieldMap = new Map<string, ReportFieldDef>();
-    const parameterMap = new Map<string, ReportParameterDef>();
-    const embeddedImages: Array<{ name: string; mimeType: string; base64Data: string }> = [];
-    const seenImageNames = new Set<string>();
-    const base64ToImageName = new Map<string, string>();
+    const existingParams: ReportParameterDef[] = [];
 
     for (const existingField of existingPattern?.fields ?? []) {
       fieldMap.set(existingField, {
@@ -77,7 +72,7 @@ export class TablixBuilder {
     }
 
     for (const existingParam of existingPattern?.parameters ?? []) {
-      parameterMap.set(existingParam, {
+      existingParams.push({
         name: existingParam,
         dataType: 'String',
         prompt: existingParam,
@@ -85,19 +80,11 @@ export class TablixBuilder {
       });
     }
 
-    // Use zero margins when any graphic/vector/text sits in the outer bleed zone so banners span edge-to-edge
-    const isFullBleed = layout.pages.some((p) =>
-      p.regions.some(
-        (r) =>
-          r.x < 0.22 ||
-          r.x + r.width > p.width - 0.22 ||
-          r.y < 0.22 ||
-          r.y + r.height > p.height - 0.22
-      )
-    );
-    const marginsIn = isFullBleed
-      ? { top: 0, right: 0, bottom: 0, left: 0 }
-      : { top: 0.25, right: 0.25, bottom: 0.25, left: 0.25 };
+    const paramCtx = createParameterDetectionContext(existingParams);
+
+    // Single-RDLC v2 engine always uses 0in page margins so ReportSection.Width == PageWidth
+    const hasAnyLayer0 = layout.pages.some((p) => Boolean(p.layer0BackgroundBase64));
+    const marginsIn = { top: 0, right: 0, bottom: 0, left: 0 };
 
     const printableWidthIn = Math.max(
       1.5,
@@ -110,18 +97,26 @@ export class TablixBuilder {
 
     const tablixRegions: TablixRegion[] = [];
     const visualPages: VisualPageLayer[] = [];
+    const pageTablixesByPage = new Map<number, TablixRegion[]>();
+    const tablixBoundsByPage = new Map<number, Array<{ x1: number; y1: number; x2: number; y2: number }>>();
+    const sampleDetailRows: Array<Record<string, string | number>> = [];
     let nameCounter = 1;
     const nextUniqueName = (prefix: string): string => `${prefix}_${nameCounter++}`;
 
+    const embeddedImages: Array<{ name: string; mimeType: string; base64Data: string }> = [];
+    const seenImageNames = new Set<string>();
+    const shaToImageName = new Map<string, string>();
+
     const registerEmbeddedImage = (base64Data: string, preferredName: string): string => {
-      const existing = base64ToImageName.get(base64Data);
+      const sha = crypto.createHash('sha256').update(base64Data).digest('hex');
+      const existing = shaToImageName.get(sha);
       if (existing) return existing;
       let imgName = sanitizeIdentifier(preferredName, `Graphic_${nameCounter}`);
       while (seenImageNames.has(imgName)) {
         imgName = `${sanitizeIdentifier(preferredName, 'Graphic')}_${nameCounter++}`;
       }
       seenImageNames.add(imgName);
-      base64ToImageName.set(base64Data, imgName);
+      shaToImageName.set(sha, imgName);
       embeddedImages.push({
         name: imgName,
         mimeType: 'image/png',
@@ -131,35 +126,25 @@ export class TablixBuilder {
     };
 
     for (const page of layout.pages) {
+      const hasLayer0 = Boolean(page.layer0BackgroundBase64);
       const regionById = new Map<string, LayoutRegion>();
       for (const r of page.regions) {
-        const dec = decisionMap.get(r.id);
-        const updated: LayoutRegion = dec
-          ? {
-              ...r,
-              semanticRole: dec.semanticRole,
-              bandKind: dec.bandOverride ?? r.bandKind,
-              preferImageFallback: dec.preferImageFallback ?? r.preferImageFallback,
-              linkedField: dec.linkedField ?? r.linkedField,
-              confidence: dec.confidence,
-            }
-          : { ...r };
-        regionById.set(updated.id, updated);
+        regionById.set(r.id, { ...r });
       }
 
       const allRegions = Array.from(regionById.values());
       const vectorRects = allRegions.filter((r) => r.type === 'vector_rect');
 
-      // 1. Identify bands that genuinely represent structured tables (<Tablix>)
+      // Convert genuine repeating detail tables (or bordered tabular grids) to native <Tablix>
       const tableBands = page.bands.filter((band) =>
-        this.isGenuineTableBand(band, vectorRects)
+        hasLayer0 ? band.isRepeatingDetail : this.isGenuineTableBand(band, vectorRects, regionById)
       );
 
       const pageTablixes: TablixRegion[] = [];
       const tablixBounds: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
 
       for (const band of tableBands) {
-        const tablix = this.buildTablixForBand(
+        const built = this.buildTablixForBand(
           band,
           page,
           regionById,
@@ -171,9 +156,15 @@ export class TablixBuilder {
           printableHeightIn,
           existingPattern,
           nextUniqueName,
-          registerEmbeddedImage
+          registerEmbeddedImage,
+          hasLayer0
         );
-        if (!tablix) continue;
+        if (!built) continue;
+
+        const { tablix, extractedDetailRows } = built;
+        if (extractedDetailRows.length > 0 && sampleDetailRows.length === 0) {
+          sampleDetailRows.push(...extractedDetailRows);
+        }
 
         const pageRelTop = roundIn(
           clamp(tablix.topIn - (page.pageNumber - 1) * page.height, 0, printableHeightIn - 0.2)
@@ -181,6 +172,7 @@ export class TablixBuilder {
         const clampedTablix: TablixRegion = {
           ...tablix,
           topIn: pageRelTop,
+          zIndex: 1,
         };
         pageTablixes.push(clampedTablix);
         tablixRegions.push(tablix);
@@ -191,6 +183,9 @@ export class TablixBuilder {
           y2: clampedTablix.topIn + clampedTablix.heightIn,
         });
       }
+
+      pageTablixesByPage.set(page.pageNumber, pageTablixes);
+      tablixBoundsByPage.set(page.pageNumber, tablixBounds);
 
       const isCoveredByTablix = (relX: number, relY: number, w: number, h: number): boolean => {
         const cx = relX + w / 2;
@@ -204,125 +199,168 @@ export class TablixBuilder {
         );
       };
 
-      // 2. Collect non-table visual Rectangles & Lines (background fills, cards, borders, hairlines)
-      const visualRectangles: VisualRectItem[] = [];
-      for (const r of allRegions) {
-        if (r.type !== 'vector_rect' && r.type !== 'vector_line') continue;
-
-        const x1 = clamp(r.x - marginsIn.left, 0, printableWidthIn);
-        const y1 = clamp(r.y - marginsIn.top, 0, printableHeightIn);
-        const x2 = clamp(r.x + r.width - marginsIn.left, 0, printableWidthIn);
-        const y2 = clamp(r.y + r.height - marginsIn.top, 0, printableHeightIn);
-        let w = roundIn(x2 - x1);
-        let h = roundIn(y2 - y1);
-
-        if (r.type === 'vector_line') {
-          const horizontal = r.width >= r.height;
-          if (horizontal) {
-            if (w < 0.05) continue;
-            h = Math.max(0.015, h);
-          } else {
-            if (h < 0.05) continue;
-            w = Math.max(0.015, w);
-          }
-          if (isCoveredByTablix(x1, y1, w, h)) continue;
-          const lineColor = r.style.borderColor ?? r.style.backgroundColor ?? '#CBD5E1';
-          visualRectangles.push({
-            kind: 'Rectangle',
-            name: nextUniqueName('LineRect'),
-            leftIn: roundIn(x1),
-            topIn: roundIn(y1),
-            widthIn: roundIn(Math.min(w, printableWidthIn - x1)),
-            heightIn: roundIn(Math.min(h, printableHeightIn - y1)),
-            backgroundColor: lineColor,
-          });
-          continue;
-        }
-
-        if (w <= 0.01 || h <= 0.01) continue;
-        const bg = r.style.backgroundColor;
-        const bc = r.style.borderColor;
-        if (!bg && !bc) continue;
-
-        // Skip full-page white backdrop
-        if (
-          w >= printableWidthIn - 0.12 &&
-          h >= printableHeightIn - 0.12 &&
-          (!bg || bg.toUpperCase() === '#FFFFFF') &&
-          !bc
-        ) {
-          continue;
-        }
-
-        if (isCoveredByTablix(x1, y1, w, h)) continue;
-
-        visualRectangles.push({
-          kind: 'Rectangle',
-          name: nextUniqueName('Rect'),
-          leftIn: roundIn(x1),
-          topIn: roundIn(y1),
-          widthIn: w,
-          heightIn: h,
-          backgroundColor: bg,
-          borderColor: bc,
-          borderWidthPt: bc ? Math.max(0.5, r.style.borderWidthPt ?? 0.75) : undefined,
-        });
-      }
-
-      // Preserve exact PDF stream painter order for filled/card Rect items, then draw hairline LineRect dividers on top
-      const shapeRects = visualRectangles.filter((v) => !v.name.startsWith('LineRect_'));
-      const lineRects = visualRectangles.filter((v) => v.name.startsWith('LineRect_'));
-      visualRectangles.splice(0, visualRectangles.length, ...shapeRects, ...lineRects);
-
-      // Deduplicate identical stacked rects at same coordinates
-      const dedupedRects: VisualRectItem[] = [];
-      for (const rect of visualRectangles) {
-        const dupIdx = dedupedRects.findIndex(
-          (prev) =>
-            Math.abs(prev.leftIn - rect.leftIn) <= 0.015 &&
-            Math.abs(prev.topIn - rect.topIn) <= 0.015 &&
-            Math.abs(prev.widthIn - rect.widthIn) <= 0.02 &&
-            Math.abs(prev.heightIn - rect.heightIn) <= 0.02
-        );
-        if (dupIdx >= 0) {
-          dedupedRects[dupIdx] = {
-            ...dedupedRects[dupIdx],
-            backgroundColor: rect.backgroundColor ?? dedupedRects[dupIdx].backgroundColor,
-            borderColor: rect.borderColor ?? dedupedRects[dupIdx].borderColor,
-            borderWidthPt: rect.borderWidthPt ?? dedupedRects[dupIdx].borderWidthPt,
-          };
-        } else {
-          dedupedRects.push(rect);
-        }
-      }
-
-      // 3. Collect freeform Images & Vector Clusters (logos, icons, illustrations)
+      // Layer 0 Background Image or Fallback Vector Rectangles
       const visualImages: VisualImageItem[] = [];
-      for (const r of allRegions) {
-        if ((r.type !== 'image' && r.type !== 'vector_complex') || !r.imageAssetBase64) continue;
-        const x1 = clamp(r.x - marginsIn.left, 0, printableWidthIn - 0.05);
-        const y1 = clamp(r.y - marginsIn.top, 0, printableHeightIn - 0.05);
-        const w = roundIn(clamp(r.width, 0.08, printableWidthIn - x1));
-        const h = roundIn(clamp(r.height, 0.08, printableHeightIn - y1));
-        if (isCoveredByTablix(x1, y1, w, h)) continue;
+      const dedupedRects: VisualRectItem[] = [];
 
-        const embName = registerEmbeddedImage(
-          r.imageAssetBase64,
-          r.imageAssetName ?? `Graphic_P${page.pageNumber}_${nameCounter}`
+      if (hasLayer0 && page.layer0BackgroundBase64) {
+        const bgName = registerEmbeddedImage(
+          page.layer0BackgroundBase64,
+          page.layer0ImageName ?? `Layer0_Page_${page.pageNumber}`
         );
         visualImages.push({
           kind: 'Image',
-          name: nextUniqueName('Img'),
-          embeddedImageName: embName,
-          leftIn: roundIn(x1),
-          topIn: roundIn(y1),
-          widthIn: w,
-          heightIn: h,
-          sizing: 'FitProportional',
+          name: `Img_Layer0_P${page.pageNumber}`,
+          embeddedImageName: bgName,
+          leftIn: 0,
+          topIn: 0,
+          widthIn: roundIn(printableWidthIn),
+          heightIn: roundIn(printableHeightIn),
+          sizing: 'Fit',
+          zIndex: 0,
         });
+
+        // Emit only broken ToUnicode glyph fallback crops at ZIndex=2 above Layer 0
+        for (const r of allRegions) {
+          if (
+            r.type === 'image' &&
+            r.imageAssetBase64 &&
+            r.sourceObjectRefs.some((ref) => ref.includes('-glyph-'))
+          ) {
+            const x1 = clamp(r.x - marginsIn.left, 0, printableWidthIn - 0.05);
+            const y1 = clamp(r.y - marginsIn.top, 0, printableHeightIn - 0.05);
+            const w = roundIn(clamp(r.width, 0.06, printableWidthIn - x1));
+            const h = roundIn(clamp(r.height, 0.06, printableHeightIn - y1));
+            const embName = registerEmbeddedImage(
+              r.imageAssetBase64,
+              r.imageAssetName ?? `GlyphCrop_P${page.pageNumber}_${nameCounter}`
+            );
+            visualImages.push({
+              kind: 'Image',
+              name: nextUniqueName('ImgGlyph'),
+              embeddedImageName: embName,
+              leftIn: roundIn(x1),
+              topIn: roundIn(y1),
+              widthIn: w,
+              heightIn: h,
+              sizing: 'Fit',
+              zIndex: 2,
+            });
+          }
+        }
+      } else {
+        // Fallback vector rect + cropped graphic mode when Layer 0 background is absent
+        const visualRectangles: VisualRectItem[] = [];
+        for (const r of allRegions) {
+          if (r.type !== 'vector_rect' && r.type !== 'vector_line') continue;
+          const x1 = clamp(r.x - marginsIn.left, 0, printableWidthIn);
+          const y1 = clamp(r.y - marginsIn.top, 0, printableHeightIn);
+          const x2 = clamp(r.x + r.width - marginsIn.left, 0, printableWidthIn);
+          const y2 = clamp(r.y + r.height - marginsIn.top, 0, printableHeightIn);
+          let w = roundIn(x2 - x1);
+          let h = roundIn(y2 - y1);
+
+          if (r.type === 'vector_line') {
+            const horizontal = r.width >= r.height;
+            if (horizontal) {
+              if (w < 0.05) continue;
+              h = Math.max(0.015, h);
+            } else {
+              if (h < 0.05) continue;
+              w = Math.max(0.015, w);
+            }
+            if (isCoveredByTablix(x1, y1, w, h)) continue;
+            const lineColor = r.style.borderColor ?? r.style.backgroundColor ?? '#CBD5E1';
+            visualRectangles.push({
+              kind: 'Rectangle',
+              name: nextUniqueName('LineRect'),
+              leftIn: roundIn(x1),
+              topIn: roundIn(y1),
+              widthIn: roundIn(Math.min(w, printableWidthIn - x1)),
+              heightIn: roundIn(Math.min(h, printableHeightIn - y1)),
+              backgroundColor: lineColor,
+              zIndex: 0,
+            });
+            continue;
+          }
+
+          if (w <= 0.01 || h <= 0.01) continue;
+          const bg = r.style.backgroundColor;
+          const bc = r.style.borderColor;
+          if (!bg && !bc) continue;
+          if (
+            w >= printableWidthIn - 0.12 &&
+            h >= printableHeightIn - 0.12 &&
+            (!bg || bg.toUpperCase() === '#FFFFFF') &&
+            !bc
+          ) {
+            continue;
+          }
+          if (isCoveredByTablix(x1, y1, w, h)) continue;
+
+          visualRectangles.push({
+            kind: 'Rectangle',
+            name: nextUniqueName('Rect'),
+            leftIn: roundIn(x1),
+            topIn: roundIn(y1),
+            widthIn: w,
+            heightIn: h,
+            backgroundColor: bg,
+            borderColor: bc,
+            borderWidthPt: bc ? Math.max(0.5, r.style.borderWidthPt ?? 0.75) : undefined,
+            zIndex: 0,
+          });
+        }
+
+        const shapeRects = visualRectangles.filter((v) => !v.name.startsWith('LineRect_'));
+        const lineRects = visualRectangles.filter((v) => v.name.startsWith('LineRect_'));
+        for (const rect of [...shapeRects, ...lineRects]) {
+          const dupIdx = dedupedRects.findIndex(
+            (prev) =>
+              Math.abs(prev.leftIn - rect.leftIn) <= 0.015 &&
+              Math.abs(prev.topIn - rect.topIn) <= 0.015 &&
+              Math.abs(prev.widthIn - rect.widthIn) <= 0.02 &&
+              Math.abs(prev.heightIn - rect.heightIn) <= 0.02
+          );
+          if (dupIdx >= 0) {
+            dedupedRects[dupIdx] = {
+              ...dedupedRects[dupIdx],
+              backgroundColor: rect.backgroundColor ?? dedupedRects[dupIdx].backgroundColor,
+              borderColor: rect.borderColor ?? dedupedRects[dupIdx].borderColor,
+              borderWidthPt: rect.borderWidthPt ?? dedupedRects[dupIdx].borderWidthPt,
+            };
+          } else {
+            dedupedRects.push(rect);
+          }
+        }
+
+        for (const r of allRegions) {
+          if ((r.type !== 'image' && r.type !== 'vector_complex') || !r.imageAssetBase64) continue;
+          const x1 = clamp(r.x - marginsIn.left, 0, printableWidthIn - 0.05);
+          const y1 = clamp(r.y - marginsIn.top, 0, printableHeightIn - 0.05);
+          const w = roundIn(clamp(r.width, 0.08, printableWidthIn - x1));
+          const h = roundIn(clamp(r.height, 0.08, printableHeightIn - y1));
+          if (isCoveredByTablix(x1, y1, w, h)) continue;
+
+          const embName = registerEmbeddedImage(
+            r.imageAssetBase64,
+            r.imageAssetName ?? `Graphic_P${page.pageNumber}_${nameCounter}`
+          );
+          visualImages.push({
+            kind: 'Image',
+            name: nextUniqueName('Img'),
+            embeddedImageName: embName,
+            leftIn: roundIn(x1),
+            topIn: roundIn(y1),
+            widthIn: w,
+            heightIn: h,
+            sizing: 'FitProportional',
+            zIndex: 1,
+          });
+        }
       }
 
-      // 4. Collect freeform coordinate-locked Textboxes
+      // Layer 1: Native coordinate-locked Textboxes + Parameterization
       const rawTextRegions = allRegions
         .filter((r) => r.type === 'text' && r.text && r.text.trim().length > 0)
         .filter((r) => {
@@ -338,7 +376,6 @@ export class TablixBuilder {
         let relX = clamp(r.x - marginsIn.left, 0, printableWidthIn - 0.1);
         const relY = clamp(r.y - marginsIn.top, 0, printableHeightIn - 0.1);
 
-        // Find nearest right-hand sibling on the same visual line so width expansion doesn't collide
         let nextLeft = printableWidthIn;
         for (let j = i + 1; j < rawTextRegions.length; j++) {
           const sib = rawTextRegions[j];
@@ -350,8 +387,24 @@ export class TablixBuilder {
           }
         }
 
+        // Check if previous sibling on the same line is a "Label:"
+        let precedingLabel: string | undefined;
+        if (i > 0) {
+          const prev = rawTextRegions[i - 1];
+          if (
+            Math.abs(prev.y - r.y) <= 0.06 &&
+            prev.x < r.x &&
+            prev.text &&
+            prev.text.trim().endsWith(':') &&
+            prev.text.trim().length <= 32
+          ) {
+            precedingLabel = prev.text.trim();
+          }
+        }
+
         const align = r.style.textAlign ?? 'Left';
-        let boxW = r.width + 0.08;
+        // Provide mild width headroom to absorb StandardFonts width variance without wrapping
+        let boxW = r.width + 0.18;
         if (align === 'Center') {
           const shift = Math.min(0.04, relX);
           relX = relX - shift;
@@ -361,17 +414,33 @@ export class TablixBuilder {
         }
         boxW = clamp(boxW, 0.08, Math.max(0.08, nextLeft - relX));
 
-        const minFontHeightIn = Math.max(r.height, (r.style.fontSizePt / 72) * 1.32);
-        const boxH = clamp(minFontHeightIn + 0.015, 0.11, printableHeightIn - relY);
+        const minFontHeightIn = Math.max(r.height, (r.style.fontSizePt / 72) * 1.28);
+        const boxH = clamp(minFontHeightIn, 0.11, printableHeightIn - relY);
 
-        // Clear box fills/borders on floating textboxes so the Rectangle layer paints cards/banners cleanly once
+        const baseRuns: VisualTextRun[] =
+          r.runs && r.runs.length > 0
+            ? r.runs
+            : [
+                {
+                  text: r.text ?? '',
+                  fontFamily: r.style.fontFamily,
+                  fontSizePt: r.style.fontSizePt,
+                  bold: r.style.bold,
+                  italic: r.style.italic,
+                  underline: r.style.underline,
+                  color: r.style.color,
+                },
+              ];
+
+        const boundRuns = parameterizeTextRuns(paramCtx, baseRuns, page.pageNumber, precedingLabel);
+
         const cleanStyle: RegionStyle = {
           ...r.style,
           backgroundColor: undefined,
           borderColor: undefined,
           borderWidthPt: undefined,
-          verticalAlign: 'Middle',
-          paddingPt: { top: 0, right: 1, bottom: 0, left: 1 },
+          verticalAlign: 'Top',
+          paddingPt: { top: 0, right: 0, bottom: 0, left: 0 },
         };
 
         visualTextboxes.push({
@@ -382,7 +451,9 @@ export class TablixBuilder {
           widthIn: roundIn(boxW),
           heightIn: roundIn(boxH),
           text: r.text ?? '',
+          runs: boundRuns,
           style: cleanStyle,
+          zIndex: 1,
         });
       }
 
@@ -397,14 +468,39 @@ export class TablixBuilder {
       });
     }
 
-    if (parameterMap.size === 0) {
-      parameterMap.set('ReportTitle', {
+    // Compile Single-RDLC v3 Full-Tablix hierarchy (100% <Tablix> body + native <PageHeader>/<PageFooter>)
+    const v3Compiler = new V3TablixCompiler(this.logger);
+    const v3Result = v3Compiler.compile({
+      pages: layout.pages,
+      pageWidthIn: printableWidthIn,
+      pageHeightIn: printableHeightIn,
+      dataSetName,
+      pageTablixesByPage,
+      coveredByTablixFn: (pNum, x, y, w, h) => {
+        const bounds = tablixBoundsByPage.get(pNum) ?? [];
+        const cx = x + w / 2;
+        const cy = y + h / 2;
+        return bounds.some(
+          (b) => cx >= b.x1 - 0.02 && cx <= b.x2 + 0.02 && cy >= b.y1 - 0.02 && cy <= b.y2 + 0.02
+        );
+      },
+      paramCtx,
+      registerEmbeddedImage,
+      nextUniqueName,
+      fieldMap,
+    });
+
+    if (paramCtx.parameters.size === 0) {
+      paramCtx.parameters.set('ReportTitle', {
         name: 'ReportTitle',
         dataType: 'String',
         prompt: 'Report Title',
         defaultValue: layout.document.name,
+        matchedPattern: 'title',
+        pageNumber: 1,
       });
     }
+
     if (fieldMap.size === 0) {
       fieldMap.set('Description', {
         name: 'Description',
@@ -434,12 +530,13 @@ export class TablixBuilder {
 
     const calculations = this.deriveCalculationRules(Array.from(fieldMap.values()));
 
-    this.logger.info('TablixBuilder', 'RDLC Tablix + Visual Layer model constructed', {
-      tablixCount: tablixRegions.length,
-      visualPages: visualPages.length,
-      totalRects: visualPages.reduce((s, p) => s + p.rectangles.length, 0),
-      totalImages: visualPages.reduce((s, p) => s + p.images.length, 0),
-      totalTextboxes: visualPages.reduce((s, p) => s + p.textboxes.length, 0),
+    this.logger.info('TablixBuilder', 'Single-RDLC v3 Full-Tablix model constructed', {
+      bodyTablixCount: v3Result.bodyTablixes.length,
+      repeatingTablixCount: tablixRegions.length,
+      hasPageHeader: Boolean(v3Result.pageHeaderSpec),
+      hasPageFooter: Boolean(v3Result.pageFooterSpec),
+      embeddedImages: embeddedImages.length,
+      parameters: paramCtx.parameters.size,
       fields: fieldMap.size,
       calculations: calculations.length,
     });
@@ -452,25 +549,41 @@ export class TablixBuilder {
       pageHeightIn: layout.document.pageHeight,
       marginsIn,
       fields: Array.from(fieldMap.values()),
-      parameters: Array.from(parameterMap.values()),
+      parameters: Array.from(paramCtx.parameters.values()),
       calculations,
-      tablixRegions,
+      tablixRegions: tablixRegions.length > 0 ? tablixRegions : v3Result.bodyTablixes,
       embeddedImages,
       existingPatternUsed: existingPattern?.sourceFiles.join(', ') || undefined,
       visualPages,
+      pageHeaderSpec: v3Result.pageHeaderSpec,
+      pageFooterSpec: v3Result.pageFooterSpec,
+      bodyTablixes: v3Result.bodyTablixes,
+      hierarchy: v3Result.hierarchy,
+      sampleDetailRows: sampleDetailRows.length > 0 ? sampleDetailRows : undefined,
     };
   }
 
-  private isGenuineTableBand(band: ReconstructedBand, vectorRects: LayoutRegion[]): boolean {
+  private isGenuineTableBand(
+    band: ReconstructedBand,
+    vectorRects: LayoutRegion[],
+    regionById: Map<string, LayoutRegion>
+  ): boolean {
     if (band.isRepeatingDetail) return true;
     const numCols = band.columnWidths.length;
     const numRows = band.rowHeights.length;
     if (band.bandKind === 'Header' || band.bandKind === 'Footer' || band.bandKind === 'Cards') {
       return false;
     }
-    if (numCols < 2 || numCols > 8 || numRows < 2) {
+    if (numCols < 2 || numCols > 20 || numRows < 2) {
       return false;
     }
+
+    // Do not collapse multi-column prose blocks into a flat Tablix; keep them as Dual-Column sections
+    const hasLongProse = band.sourceRegionIds.some((id) => {
+      const reg = regionById.get(id);
+      return Boolean(reg?.text && reg.text.length > 160);
+    });
+    if (hasLongProse) return false;
 
     const bandRects = vectorRects.filter(
       (r) =>
@@ -484,9 +597,8 @@ export class TablixBuilder {
         Boolean(r.style.backgroundColor || r.style.borderColor)
     );
 
-    if (bandRects.length < 3) return false;
+    if (bandRects.length < 4) return false;
 
-    // Require distinct row-like rect bands (at least 2 distinct Y rows)
     const distinctYs: number[] = [];
     for (const r of bandRects) {
       if (!distinctYs.some((y) => Math.abs(y - r.y) <= 0.08)) {
@@ -508,8 +620,9 @@ export class TablixBuilder {
     printableHeightIn: number,
     existingPattern: ExistingProjectPattern | undefined,
     nextUniqueName: (prefix: string) => string,
-    registerEmbeddedImage: (b64: string, name: string) => string
-  ): TablixRegion | undefined {
+    registerEmbeddedImage: (b64: string, name: string) => string,
+    hasLayer0: boolean
+  ): { tablix: TablixRegion; extractedDetailRows: Array<Record<string, string | number>> } | undefined {
     if (band.isRepeatingDetail) {
       return this.buildRepeatingLogicalTablix(
         band,
@@ -521,7 +634,8 @@ export class TablixBuilder {
         marginsIn,
         printableWidthIn,
         printableHeightIn,
-        nextUniqueName
+        nextUniqueName,
+        hasLayer0
       );
     }
 
@@ -532,8 +646,6 @@ export class TablixBuilder {
     const cellLookup = new Map(band.cells.map((c) => [`${c.row}:${c.col}`, c]));
     const skippedCoords = new Set<string>();
     const rows: TablixRow[] = [];
-
-    const columnHeaderNames: string[] = [];
 
     const findEnclosingRectForCell = (rIdx: number, cIdx: number, colSpan: number, rowSpan: number): LayoutRegion | undefined => {
       const x1 = band.columnBoundaries[cIdx] ?? band.x;
@@ -556,11 +668,6 @@ export class TablixBuilder {
     };
 
     for (let rIdx = 0; rIdx < numRows; rIdx++) {
-      const isDetailRow = band.isRepeatingDetail && rIdx === 1;
-      if (band.isRepeatingDetail && rIdx > 1) {
-        continue;
-      }
-
       const rowCells: TablixCell[] = [];
       for (let cIdx = 0; cIdx < numCols; cIdx++) {
         const key = `${rIdx}:${cIdx}`;
@@ -578,9 +685,7 @@ export class TablixBuilder {
 
         const assigned = cellLookup.get(key);
         const colSpan = Math.min(numCols - cIdx, Math.max(1, assigned?.colSpan ?? 1));
-        const rowSpan = band.isRepeatingDetail
-          ? 1
-          : Math.min(numRows - rIdx, Math.max(1, assigned?.rowSpan ?? 1));
+        const rowSpan = Math.min(numRows - rIdx, Math.max(1, assigned?.rowSpan ?? 1));
 
         for (let rr = rIdx; rr < rIdx + rowSpan; rr++) {
           for (let cc = cIdx; cc < cIdx + colSpan; cc++) {
@@ -620,28 +725,7 @@ export class TablixBuilder {
         if (region && region.type === 'text' && region.text) {
           let value = region.text;
           let isExpression = false;
-
-          if (isDetailRow) {
-            const fieldName = columnHeaderNames[cIdx] ?? sanitizeIdentifier(`Col${cIdx + 1}`, `Col${cIdx + 1}`);
-            const isNumeric = /^[\$\€\£]?\s*-?\d/.test(region.text.trim());
-            const isCalc = /total|amount|net|subtotal/i.test(fieldName);
-            if (!fieldMap.has(fieldName)) {
-              fieldMap.set(fieldName, {
-                name: fieldName,
-                dataType: isNumeric ? 'System.Decimal' : 'System.String',
-                sampleValue: isNumeric
-                  ? Number(region.text.replace(/[^0-9.-]/g, '')) || 0
-                  : region.text,
-                isCalculated: isCalc,
-              });
-            }
-            if (isCalc && fieldMap.has('Qty') && fieldMap.has('Price')) {
-              value = '=Code.CalculateLineTotal(Fields!Qty.Value, Fields!Price.Value, 0)';
-            } else {
-              value = `=Fields!${fieldName}.Value`;
-            }
-            isExpression = true;
-          } else if (
+          if (
             Boolean(existingPattern) &&
             (region.semanticRole === 'fieldValue' || region.semanticRole === 'calculationField')
           ) {
@@ -669,9 +753,9 @@ export class TablixBuilder {
 
           const cellStyle: RegionStyle = {
             ...region.style,
-            backgroundColor: region.style.backgroundColor ?? cellRect?.style.backgroundColor,
-            borderColor: region.style.borderColor ?? cellRect?.style.borderColor ?? '#CBD5E1',
-            borderWidthPt: region.style.borderWidthPt ?? cellRect?.style.borderWidthPt ?? 0.5,
+            backgroundColor: hasLayer0 ? undefined : region.style.backgroundColor ?? cellRect?.style.backgroundColor,
+            borderColor: hasLayer0 ? undefined : region.style.borderColor ?? cellRect?.style.borderColor ?? '#CBD5E1',
+            borderWidthPt: hasLayer0 ? undefined : region.style.borderWidthPt ?? cellRect?.style.borderWidthPt ?? 0.5,
           };
 
           rowCells.push({
@@ -684,6 +768,7 @@ export class TablixBuilder {
               kind: 'Textbox',
               name: nextUniqueName('Txt'),
               value,
+              runs: isExpression ? undefined : region.runs,
               isExpression,
               style: cellStyle,
               canGrow: true,
@@ -704,14 +789,14 @@ export class TablixBuilder {
             value: '',
             isExpression: false,
             style: {
-              fontFamily: 'Segoe UI',
+              fontFamily: 'Arial',
               fontSizePt: 9,
               bold: false,
               italic: false,
               color: '#0F172A',
-              backgroundColor: region?.style.backgroundColor ?? cellRect?.style.backgroundColor,
-              borderColor: region?.style.borderColor ?? cellRect?.style.borderColor ?? '#CBD5E1',
-              borderWidthPt: region?.style.borderWidthPt ?? cellRect?.style.borderWidthPt ?? 0.5,
+              backgroundColor: hasLayer0 ? undefined : region?.style.backgroundColor ?? cellRect?.style.backgroundColor,
+              borderColor: hasLayer0 ? undefined : region?.style.borderColor ?? cellRect?.style.borderColor ?? '#CBD5E1',
+              borderWidthPt: hasLayer0 ? undefined : region?.style.borderWidthPt ?? cellRect?.style.borderWidthPt ?? 0.5,
               textAlign: 'Left',
               verticalAlign: 'Middle',
               paddingPt: { top: 1, right: 2, bottom: 1, left: 2 },
@@ -724,7 +809,7 @@ export class TablixBuilder {
       const rowHeightIn = Math.max(0.18, roundIn(band.rowHeights[rIdx] ?? 0.25));
       rows.push({
         heightIn: rowHeightIn,
-        isDetailRow,
+        isDetailRow: false,
         cells: rowCells,
       });
     }
@@ -763,18 +848,21 @@ export class TablixBuilder {
     const docTopIn = roundIn((page.pageNumber - 1) * page.height + pageRelTop);
 
     return {
-      id: band.id,
-      name: sanitizeIdentifier(band.name, nextUniqueName('Tablix')),
-      pageNumber: page.pageNumber,
-      bandKind: band.bandKind,
-      topIn: docTopIn,
-      leftIn,
-      widthIn: totalTablixWidth,
-      heightIn: totalTablixHeight,
-      dataSetName,
-      isRepeatingDetail: band.isRepeatingDetail,
-      columnWidthsIn,
-      rows,
+      tablix: {
+        id: band.id,
+        name: sanitizeIdentifier(band.name, nextUniqueName('Tablix')),
+        pageNumber: page.pageNumber,
+        bandKind: band.bandKind,
+        topIn: docTopIn,
+        leftIn,
+        widthIn: totalTablixWidth,
+        heightIn: totalTablixHeight,
+        dataSetName,
+        isRepeatingDetail: band.isRepeatingDetail,
+        columnWidthsIn,
+        rows,
+      },
+      extractedDetailRows: [],
     };
   }
 
@@ -788,8 +876,9 @@ export class TablixBuilder {
     marginsIn: { top: number; right: number; bottom: number; left: number },
     printableWidthIn: number,
     printableHeightIn: number,
-    nextUniqueName: (prefix: string) => string
-  ): TablixRegion | undefined {
+    nextUniqueName: (prefix: string) => string,
+    hasLayer0: boolean
+  ): { tablix: TablixRegion; extractedDetailRows: Array<Record<string, string | number>> } | undefined {
     const textRegions = band.sourceRegionIds
       .map((id) => regionById.get(id))
       .filter((r): r is LayoutRegion => Boolean(r && r.type === 'text' && r.text && r.text.trim().length > 0))
@@ -814,7 +903,6 @@ export class TablixBuilder {
     const numCols = headerRegions.length;
     if (numCols === 0) return undefined;
 
-    // Derive crisp column boundaries splitting halfway between adjacent headers inside band.x..band.x+band.width
     const leftIn = clamp(roundIn(band.x - marginsIn.left), 0, Math.max(0, printableWidthIn - 0.5));
     const rightBound = Math.min(band.x + band.width, marginsIn.left + printableWidthIn - 0.01);
     const totalBandW = Math.max(0.5, rightBound - band.x);
@@ -834,7 +922,7 @@ export class TablixBuilder {
 
     const findRowRect = (rowY: number): LayoutRegion | undefined =>
       vectorRects
-        .filter((vr) => rowY >= vr.y - 0.05 && rowY <= vr.y + vr.height + 0.05 && vr.width >= totalBandW * 0.5)
+        .filter((vr) => rowY >= vr.y - 0.08 && rowY <= vr.y + vr.height + 0.08 && vr.width >= totalBandW * 0.5)
         .sort((a, b) => a.width * a.height - b.width * b.height)[0];
 
     const headerRect = findRowRect(headerRegions[0].y);
@@ -844,6 +932,7 @@ export class TablixBuilder {
     const headerCells: TablixCell[] = headerRegions.map((hReg, cIdx) => {
       const colName = sanitizeIdentifier(hReg.text ?? `Column${cIdx + 1}`, `Column${cIdx + 1}`);
       columnHeaderNames.push(colName);
+      const padLeftPt = Math.max(0, Math.round((hReg.x - colStarts[cIdx]) * 72));
       return {
         colIndex: cIdx,
         rowIndex: 0,
@@ -857,9 +946,11 @@ export class TablixBuilder {
           isExpression: false,
           style: {
             ...hReg.style,
-            backgroundColor: hReg.style.backgroundColor ?? headerRect?.style.backgroundColor ?? '#EEF2F6',
-            borderColor: hReg.style.borderColor ?? headerRect?.style.borderColor ?? '#CBD5E1',
-            borderWidthPt: hReg.style.borderWidthPt ?? headerRect?.style.borderWidthPt ?? 0.75,
+            backgroundColor: hasLayer0 ? undefined : hReg.style.backgroundColor ?? headerRect?.style.backgroundColor ?? '#EEF2F6',
+            borderColor: hasLayer0 ? undefined : hReg.style.borderColor ?? headerRect?.style.borderColor ?? '#CBD5E1',
+            borderWidthPt: hasLayer0 ? undefined : hReg.style.borderWidthPt ?? headerRect?.style.borderWidthPt ?? 0.75,
+            verticalAlign: 'Middle',
+            paddingPt: { top: 0, right: 2, bottom: 0, left: padLeftPt },
           },
           canGrow: true,
         },
@@ -889,10 +980,15 @@ export class TablixBuilder {
         });
       }
 
+      const discountArg = fieldMap.has('Discount') ? 'Fields!Discount.Value' : '0';
       const value =
         isCalc && fieldMap.has('Qty') && fieldMap.has('Price')
-          ? '=Code.CalculateLineTotal(Fields!Qty.Value, Fields!Price.Value, 0)'
+          ? `=Code.CalculateLineTotal(Fields!Qty.Value, Fields!Price.Value, ${discountArg})`
           : `=Fields!${fieldName}.Value`;
+
+      const padLeftPt = matchedReg
+        ? Math.max(0, Math.round((matchedReg.x - colLeft) * 72))
+        : 2;
 
       detailCells.push({
         colIndex: cIdx,
@@ -908,41 +1004,70 @@ export class TablixBuilder {
           style: {
             ...(matchedReg?.style ?? headerRegions[cIdx].style),
             bold: false,
-            backgroundColor: matchedReg?.style.backgroundColor ?? dataRect?.style.backgroundColor,
-            borderColor: matchedReg?.style.borderColor ?? dataRect?.style.borderColor ?? '#CBD5E1',
-            borderWidthPt: matchedReg?.style.borderWidthPt ?? dataRect?.style.borderWidthPt ?? 0.5,
+            backgroundColor: hasLayer0 ? undefined : matchedReg?.style.backgroundColor ?? dataRect?.style.backgroundColor,
+            borderColor: hasLayer0 ? undefined : matchedReg?.style.borderColor ?? dataRect?.style.borderColor ?? '#CBD5E1',
+            borderWidthPt: hasLayer0 ? undefined : matchedReg?.style.borderWidthPt ?? dataRect?.style.borderWidthPt ?? 0.5,
+            verticalAlign: 'Middle',
+            paddingPt: { top: 0, right: 2, bottom: 0, left: padLeftPt },
           },
           canGrow: true,
         },
       });
     }
 
-    const headerH = Math.max(0.24, roundIn(headerRect?.height ?? headerRegions[0].height + 0.12));
-    const detailH = Math.max(0.24, roundIn(dataRect?.height ?? (dataRegions[0]?.height ?? 0.16) + 0.12));
+    // Collect ALL repeating detail rows for exact 1:1 preview & PDF fidelity
+    const extractedDetailRows: Array<Record<string, string | number>> = [];
+    for (let rIdx = 1; rIdx < logicalRows.length; rIdx++) {
+      const rowRegs = logicalRows[rIdx];
+      const rowObj: Record<string, string | number> = {};
+      for (let cIdx = 0; cIdx < numCols; cIdx++) {
+        const colLeft = colStarts[cIdx];
+        const colRight = colStarts[cIdx + 1];
+        const matched = rowRegs.find((dr) => {
+          const cx = dr.x + dr.width / 2;
+          return cx >= colLeft - 0.08 && cx <= colRight + 0.08;
+        });
+        const colName = columnHeaderNames[cIdx] ?? `Col${cIdx + 1}`;
+        rowObj[colName] = matched?.text?.trim() ?? '';
+      }
+      extractedDetailRows.push(rowObj);
+    }
+
+    const rowPitch =
+      logicalRows.length >= 3
+        ? Math.max(0.18, roundIn(logicalRows[2][0].y - logicalRows[1][0].y))
+        : undefined;
+    const headerTopY = headerRect?.y ?? Math.max(0, headerRegions[0].y - 0.08);
+    const firstDataTopY = dataRect?.y ?? Math.max(headerTopY + 0.22, dataRegions[0]?.y - 0.08);
+    const headerH = Math.max(0.22, roundIn(firstDataTopY - headerTopY));
+    const detailH = Math.max(0.2, roundIn(rowPitch ?? dataRect?.height ?? (dataRegions[0]?.height ?? 0.16) + 0.12));
 
     const rows: TablixRow[] = [
       { heightIn: headerH, isDetailRow: false, cells: headerCells },
       { heightIn: detailH, isDetailRow: true, cells: detailCells },
     ];
 
-    const pageRelTop = clamp(roundIn(band.y - marginsIn.top), 0, Math.max(0, printableHeightIn - headerH - detailH));
+    const pageRelTop = clamp(roundIn(headerTopY - marginsIn.top), 0, Math.max(0, printableHeightIn - headerH - detailH));
     const totalTablixWidth = roundIn(columnWidthsIn.reduce((s, w) => s + w, 0));
     const totalTablixHeight = roundIn(headerH + detailH);
     const docTopIn = roundIn((page.pageNumber - 1) * page.height + pageRelTop);
 
     return {
-      id: band.id,
-      name: sanitizeIdentifier(band.name, nextUniqueName('Tablix')),
-      pageNumber: page.pageNumber,
-      bandKind: band.bandKind,
-      topIn: docTopIn,
-      leftIn,
-      widthIn: totalTablixWidth,
-      heightIn: totalTablixHeight,
-      dataSetName,
-      isRepeatingDetail: true,
-      columnWidthsIn,
-      rows,
+      tablix: {
+        id: band.id,
+        name: sanitizeIdentifier(band.name, nextUniqueName('Tablix')),
+        pageNumber: page.pageNumber,
+        bandKind: band.bandKind,
+        topIn: docTopIn,
+        leftIn,
+        widthIn: totalTablixWidth,
+        heightIn: totalTablixHeight,
+        dataSetName,
+        isRepeatingDetail: true,
+        columnWidthsIn,
+        rows,
+      },
+      extractedDetailRows,
     };
   }
 

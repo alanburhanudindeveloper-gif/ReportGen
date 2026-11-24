@@ -11,22 +11,12 @@
       "label": "ReportGen: Scan Sample Proposal Project (Deterministic)",
       "type": "shell",
       "command": "npx tsx src/cli/proposalCli.ts scan --project samples/SampleProposalProject",
-      "options": {
-        "env": {
-          "LLM_PROVIDER": "none"
-        }
-      },
       "problemMatcher": []
     },
     {
       "label": "ReportGen: Build Deterministic Product Catalog",
       "type": "shell",
       "command": "npx tsx src/cli/proposalCli.ts catalog --project samples/SampleProposalProject",
-      "options": {
-        "env": {
-          "LLM_PROVIDER": "none"
-        }
-      },
       "problemMatcher": []
     },
     {
@@ -38,12 +28,7 @@
     {
       "label": "ReportGen: Run Offline Verification Suite",
       "type": "shell",
-      "command": "npx tsx tests/run-agent-contract-tests.ts && npx tsx tests/run-llm-provider-tests.ts && npx tsx tests/run-e2e-tests.ts && npx tsx tests/run-proposal-e2e.ts",
-      "options": {
-        "env": {
-          "LLM_PROVIDER": "none"
-        }
-      },
+      "command": "npx tsx tests/run-agent-contract-tests.ts && npx tsx tests/run-e2e-tests.ts && npx tsx tests/run-proposal-e2e.ts",
       "problemMatcher": []
     }
   ]

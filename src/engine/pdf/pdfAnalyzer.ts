@@ -3,6 +3,16 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
+import zlib from 'zlib';
+import {
+  decodePDFRawStream,
+  PDFArray,
+  PDFDict,
+  PDFDocument,
+  PDFName,
+  PDFRawStream,
+  PDFRef,
+} from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import {
   BandKind,
@@ -13,6 +23,7 @@ import {
   ReportGenError,
   ReportGenErrorCode,
   StructuredLogger,
+  VisualTextRun,
 } from '../core/types.ts';
 
 const execFileAsync = promisify(execFile);
@@ -40,6 +51,39 @@ interface RawVectorRect {
 interface TextColorEvent {
   x: number;
   y: number;
+  color: string;
+}
+
+interface NormalizedSpan {
+  text: string;
+  x: number;
+  y: number;
+  baselineY: number;
+  width: number;
+  height: number;
+  fontSizePt: number;
+  fontName: string;
+  fontLoadedName?: string;
+  fontFamily: string;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  color: string;
+  brokenGlyph: boolean;
+}
+
+interface MergedTextLine {
+  text: string;
+  runs: VisualTextRun[];
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fontSizePt: number;
+  fontFamily: string;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
   color: string;
 }
 
@@ -87,14 +131,14 @@ function cmykToHex(c: number, m: number, y: number, k: number): string {
 
 function defaultStyle(): RegionStyle {
   return {
-    fontFamily: 'Segoe UI',
+    fontFamily: 'Arial',
     fontSizePt: 10,
     bold: false,
     italic: false,
     color: '#0F172A',
     textAlign: 'Left',
-    verticalAlign: 'Middle',
-    paddingPt: { top: 2, right: 4, bottom: 2, left: 4 },
+    verticalAlign: 'Top',
+    paddingPt: { top: 0, right: 0, bottom: 0, left: 0 },
   };
 }
 
@@ -109,19 +153,37 @@ function inferFontFlags(fontName: string, loadedFontName?: string): {
     combined.includes('bd') ||
     combined.includes('black') ||
     combined.includes('semibold') ||
-    combined.includes('heavy');
+    combined.includes('demi') ||
+    combined.includes('heavy') ||
+    /(?:^|[-_+])(700|800|900)/.test(combined);
   const italic = combined.includes('italic') || combined.includes('oblique');
+  const isExplicitSans =
+    combined.includes('sans-serif') ||
+    combined.includes('sans') ||
+    combined.includes('helvetica') ||
+    combined.includes('arial') ||
+    combined.includes('calibri') ||
+    combined.includes('segoe') ||
+    combined.includes('montserrat') ||
+    combined.includes('roboto') ||
+    combined.includes('inter');
+
   let family = 'Arial';
-  if (combined.includes('times') || combined.includes('serif') || combined.includes('garamond')) {
+  if (combined.includes('courier') || combined.includes('mono') || combined.includes('consolas')) {
+    family = 'Courier New';
+  } else if (
+    !isExplicitSans &&
+    (combined.includes('times') ||
+      combined.includes('garamond') ||
+      combined.includes('georgia') ||
+      combined.includes('cambria') ||
+      /(?:^|[^a-z])serif(?:$|[^a-z])/.test(combined))
+  ) {
     family = 'Times New Roman';
-  } else if (combined.includes('courier') || combined.includes('mono') || combined.includes('consolas')) {
-    family = 'Consolas';
-  } else if (combined.includes('calibri')) {
-    family = 'Calibri';
   } else if (combined.includes('segoe')) {
     family = 'Segoe UI';
-  } else if (combined.includes('helvetica')) {
-    family = 'Arial';
+  } else if (combined.includes('calibri')) {
+    family = 'Calibri';
   }
   return { family, bold, italic };
 }
@@ -132,6 +194,308 @@ function classifyBandHeuristic(yIn: number, pageHeightIn: number): BandKind {
   return 'Detail';
 }
 
+function normalizeLigatures(str: string): string {
+  if (!str) return str;
+  return str
+    .replace(/\uFB00/g, 'ff')
+    .replace(/\uFB01/g, 'fi')
+    .replace(/\uFB02/g, 'fl')
+    .replace(/\uFB03/g, 'ffi')
+    .replace(/\uFB04/g, 'ffl')
+    .replace(/\uFB05/g, 'st')
+    .replace(/\uFB06/g, 'st');
+}
+
+function hasBrokenGlyphs(str: string): boolean {
+  if (!str) return false;
+  if (/[\uFFFD\uE000-\uF8FF\u0234\u0235\u025D\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(str)) {
+    return true;
+  }
+  if (/\(cid:\d+\)/i.test(str)) {
+    return true;
+  }
+  return false;
+}
+
+function isPdfDelimiter(byte: number): boolean {
+  return (
+    byte === 0x20 || // space
+    byte === 0x0a || // LF
+    byte === 0x0d || // CR
+    byte === 0x09 || // TAB
+    byte === 0x0c || // FF
+    byte === 0x00 || // NUL
+    byte === 0x28 || // (
+    byte === 0x29 || // )
+    byte === 0x3c || // <
+    byte === 0x3e || // >
+    byte === 0x5b || // [
+    byte === 0x5d || // ]
+    byte === 0x7b || // {
+    byte === 0x7d || // }
+    byte === 0x2f || // /
+    byte === 0x25 // %
+  );
+}
+
+function isWhitespace(byte: number): boolean {
+  return byte === 0x20 || byte === 0x0a || byte === 0x0d || byte === 0x09 || byte === 0x0c || byte === 0x00;
+}
+
+const TEXT_ONLY_OPS = new Set([
+  'Tf',
+  'Tm',
+  'Td',
+  'TD',
+  'T*',
+  'Tc',
+  'Tw',
+  'Tz',
+  'TL',
+  'Tr',
+  'Ts',
+  'Tj',
+  'TJ',
+  "'",
+  '"',
+]);
+
+/**
+ * Deterministic byte-level PDF content stream lexer that strips all text-positioning
+ * and text-showing operators inside BT ... ET blocks while preserving color,
+ * ExtGState, and graphics-state operators (rg, RG, k, K, g, G, cs, sc, gs, etc.)
+ * that subsequent shapes or table backgrounds may inherit.
+ */
+export function stripBtEtFromContentStream(bytes: Uint8Array): Uint8Array {
+  const out: number[] = [];
+  const len = bytes.length;
+  let i = 0;
+  let inTextObject = false;
+  let pendingOperands: Uint8Array[] = [];
+
+  const pushBytes = (chunk: Uint8Array) => {
+    for (let k = 0; k < chunk.length; k++) out.push(chunk[k]);
+  };
+
+  const emitChunk = (chunk: Uint8Array) => {
+    if (!inTextObject) {
+      pushBytes(chunk);
+    } else {
+      pendingOperands.push(chunk);
+    }
+  };
+
+  const readLiteralString = (): Uint8Array => {
+    const start = i;
+    let depth = 1;
+    i++;
+    while (i < len && depth > 0) {
+      const c = bytes[i];
+      if (c === 0x5c && i + 1 < len) {
+        i += 2;
+        continue;
+      }
+      if (c === 0x28) depth++;
+      else if (c === 0x29) depth--;
+      i++;
+    }
+    return bytes.subarray(start, i);
+  };
+
+  const readAngleBracket = (): Uint8Array => {
+    const start = i;
+    if (i + 1 < len && bytes[i + 1] === 0x3c) {
+      let dictDepth = 1;
+      i += 2;
+      while (i < len && dictDepth > 0) {
+        if (bytes[i] === 0x28) {
+          readLiteralString();
+          continue;
+        }
+        if (bytes[i] === 0x3c && i + 1 < len && bytes[i + 1] === 0x3c) {
+          dictDepth++;
+          i += 2;
+          continue;
+        }
+        if (bytes[i] === 0x3e && i + 1 < len && bytes[i + 1] === 0x3e) {
+          dictDepth--;
+          i += 2;
+          continue;
+        }
+        i++;
+      }
+      return bytes.subarray(start, i);
+    }
+    i++;
+    while (i < len && bytes[i] !== 0x3e) i++;
+    if (i < len) i++;
+    return bytes.subarray(start, i);
+  };
+
+  const readArray = (): Uint8Array => {
+    const start = i;
+    let arrDepth = 1;
+    i++;
+    while (i < len && arrDepth > 0) {
+      const c = bytes[i];
+      if (c === 0x28) {
+        readLiteralString();
+        continue;
+      }
+      if (c === 0x3c) {
+        readAngleBracket();
+        continue;
+      }
+      if (c === 0x5b) arrDepth++;
+      else if (c === 0x5d) arrDepth--;
+      i++;
+    }
+    return bytes.subarray(start, i);
+  };
+
+  while (i < len) {
+    const b = bytes[i];
+
+    // Whitespace
+    if (isWhitespace(b)) {
+      if (!inTextObject) out.push(b);
+      i++;
+      continue;
+    }
+
+    // Comment %...\n
+    if (b === 0x25) {
+      const start = i;
+      while (i < len && bytes[i] !== 0x0a && bytes[i] !== 0x0d) i++;
+      if (!inTextObject) pushBytes(bytes.subarray(start, i));
+      continue;
+    }
+
+    // Literal string (...)
+    if (b === 0x28) {
+      emitChunk(readLiteralString());
+      continue;
+    }
+
+    // Dictionary <<...>> or hex string <...>
+    if (b === 0x3c) {
+      emitChunk(readAngleBracket());
+      continue;
+    }
+
+    // Array [...]
+    if (b === 0x5b) {
+      emitChunk(readArray());
+      continue;
+    }
+
+    // Name /...
+    if (b === 0x2f) {
+      const start = i;
+      i++;
+      while (i < len && !isPdfDelimiter(bytes[i])) i++;
+      emitChunk(bytes.subarray(start, i));
+      continue;
+    }
+
+    // Single-char delimiter operators (like ' or ") or unexpected delimiters
+    if (isPdfDelimiter(b)) {
+      if (inTextObject && (b === 0x27 || b === 0x22)) {
+        pendingOperands = [];
+        i++;
+        continue;
+      }
+      if (!inTextObject) out.push(b);
+      i++;
+      continue;
+    }
+
+    // Collect regular token (number, boolean, keyword/operator)
+    const start = i;
+    while (i < len && !isPdfDelimiter(bytes[i])) i++;
+    const chunk = bytes.subarray(start, i);
+    const token = Buffer.from(chunk).toString('latin1');
+
+    // Inline image BI ... ID ... EI when outside text objects
+    if (!inTextObject && token === 'BI') {
+      pushBytes(chunk);
+      while (i < len) {
+        if (
+          bytes[i] === 0x49 &&
+          bytes[i + 1] === 0x44 &&
+          (i === 0 || isWhitespace(bytes[i - 1])) &&
+          i + 2 < len &&
+          isWhitespace(bytes[i + 2])
+        ) {
+          out.push(0x49, 0x44, bytes[i + 2]);
+          i += 3;
+          while (i < len) {
+            if (
+              i + 2 < len &&
+              isWhitespace(bytes[i]) &&
+              bytes[i + 1] === 0x45 &&
+              bytes[i + 2] === 0x49 &&
+              (i + 3 >= len || isPdfDelimiter(bytes[i + 3]))
+            ) {
+              out.push(bytes[i], 0x45, 0x49);
+              i += 3;
+              break;
+            }
+            out.push(bytes[i]);
+            i++;
+          }
+          break;
+        }
+        out.push(bytes[i]);
+        i++;
+      }
+      continue;
+    }
+
+    if (token === 'BT') {
+      inTextObject = true;
+      pendingOperands = [];
+      out.push(0x20);
+      continue;
+    }
+
+    if (token === 'ET') {
+      inTextObject = false;
+      pendingOperands = [];
+      out.push(0x20);
+      continue;
+    }
+
+    if (!inTextObject) {
+      pushBytes(chunk);
+      continue;
+    }
+
+    // Inside BT ... ET: classify numbers/booleans/null as operands; operators flush or drop
+    const isOperand =
+      token === 'true' ||
+      token === 'false' ||
+      token === 'null' ||
+      /^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(token);
+
+    if (isOperand) {
+      pendingOperands.push(chunk);
+    } else if (TEXT_ONLY_OPS.has(token)) {
+      pendingOperands = [];
+    } else {
+      for (const op of pendingOperands) {
+        pushBytes(op);
+        out.push(0x20);
+      }
+      pushBytes(chunk);
+      out.push(0x20);
+      pendingOperands = [];
+    }
+  }
+
+  return Uint8Array.from(out);
+}
+
 export class PdfAnalyzer {
   private readonly logger: StructuredLogger;
 
@@ -139,12 +503,87 @@ export class PdfAnalyzer {
     this.logger = logger;
   }
 
+  public async stripTextOperatorsFromPdf(pdfBytes: Uint8Array): Promise<Uint8Array> {
+    const doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+    const visitedRefs = new Set<string>();
+
+    const rewriteRawStream = (raw: PDFRawStream) => {
+      try {
+        const decoded = decodePDFRawStream(raw).decode();
+        const stripped = stripBtEtFromContentStream(decoded);
+        const compressed = zlib.deflateSync(Buffer.from(stripped));
+        const mut = raw as unknown as { contents: Uint8Array; dict: PDFDict };
+        mut.contents = new Uint8Array(compressed);
+        mut.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
+        mut.dict.delete(PDFName.of('DecodeParms'));
+        mut.dict.set(PDFName.of('Length'), doc.context.obj(compressed.length));
+      } catch {
+        // Leave undecodable custom-filter streams untouched so Ghostscript does not fail
+      }
+    };
+
+    const processXObjects = (resources: PDFDict | undefined) => {
+      if (!resources) return;
+      const xObjEntry = resources.lookup(PDFName.of('XObject'));
+      if (!(xObjEntry instanceof PDFDict)) return;
+      for (const [, val] of xObjEntry.entries()) {
+        const refKey = val instanceof PDFRef ? val.toString() : undefined;
+        if (refKey) {
+          if (visitedRefs.has(refKey)) continue;
+          visitedRefs.add(refKey);
+        }
+        const resolved = doc.context.lookup(val);
+        if (resolved instanceof PDFRawStream) {
+          const subtype = resolved.dict.get(PDFName.of('Subtype'));
+          if (subtype === PDFName.of('Form')) {
+            rewriteRawStream(resolved);
+            const nestedRes = resolved.dict.lookup(PDFName.of('Resources'));
+            if (nestedRes instanceof PDFDict) {
+              processXObjects(nestedRes);
+            }
+          }
+        }
+      }
+    };
+
+    for (const page of doc.getPages()) {
+      const contentsVal = page.node.get(PDFName.of('Contents'));
+      const processContentObj = (obj: unknown) => {
+        if (obj instanceof PDFRef) {
+          const key = obj.toString();
+          if (visitedRefs.has(key)) return;
+          visitedRefs.add(key);
+          const resolved = doc.context.lookup(obj);
+          processContentObj(resolved);
+          return;
+        }
+        if (obj instanceof PDFRawStream) {
+          rewriteRawStream(obj);
+          return;
+        }
+        if (obj instanceof PDFArray) {
+          for (let i = 0; i < obj.size(); i++) {
+            processContentObj(obj.get(i));
+          }
+        }
+      };
+
+      processContentObj(contentsVal);
+      const pageResources = page.node.lookup(PDFName.of('Resources'));
+      if (pageResources instanceof PDFDict) {
+        processXObjects(pageResources);
+      }
+    }
+
+    return doc.save({ useObjectStreams: false });
+  }
+
   public async analyzeBuffer(
     pdfBytes: Uint8Array,
     documentName: string,
-    dpi = 144
+    dpi = 150
   ): Promise<IntermediateLayoutModel> {
-    this.logger.info('PdfAnalysis', `PDF analysis started for "${documentName}"`);
+    this.logger.info('PdfAnalysis', `PDF analysis started for "${documentName}"`, { dpi });
     try {
       const loadingTask = pdfjsLib.getDocument({
         data: new Uint8Array(pdfBytes),
@@ -159,6 +598,24 @@ export class PdfAnalyzer {
       }
 
       const pagePreviews = await this.rasterizePagesWithGhostscript(pdfBytes, dpi);
+      let lazyStrippedPreviews: Buffer[] | null = null;
+      const getTextStrippedPagePng = async (pageIdxZeroBased: number): Promise<Buffer | undefined> => {
+        if (lazyStrippedPreviews === null) {
+          try {
+            const strippedBytes = await this.stripTextOperatorsFromPdf(pdfBytes);
+            lazyStrippedPreviews = await this.rasterizePagesWithGhostscript(strippedBytes, dpi);
+          } catch (stripErr) {
+            this.logger.warn(
+              'PdfAnalysis',
+              `Text-stripped crop fallback triggered: ${stripErr instanceof Error ? stripErr.message : String(stripErr)}`
+            );
+            lazyStrippedPreviews = [];
+          }
+        }
+        return lazyStrippedPreviews.length === numPages
+          ? lazyStrippedPreviews[pageIdxZeroBased]
+          : pagePreviews[pageIdxZeroBased];
+      };
 
       const pages: LayoutPage[] = [];
       let regionSeq = 1;
@@ -180,6 +637,7 @@ export class PdfAnalyzer {
         for (let idx = 0; idx < vectorRects.length; idx++) {
           const vr = vectorRects[idx];
           const isLine = vr.height <= 0.04 || vr.width <= 0.04;
+          const minDim = isLine ? 0.006 : 0.015;
           const style: RegionStyle = {
             ...defaultStyle(),
             backgroundColor: vr.fillColor,
@@ -192,8 +650,8 @@ export class PdfAnalyzer {
             type: isLine ? 'vector_line' : 'vector_rect',
             x: roundIn(vr.x),
             y: roundIn(vr.y),
-            width: roundIn(Math.max(0.015, vr.width)),
-            height: roundIn(Math.max(0.015, vr.height)),
+            width: roundIn(Math.max(minDim, vr.width)),
+            height: roundIn(Math.max(minDim, vr.height)),
             style,
             semanticRole: 'unknown',
             confidence: 0.95,
@@ -205,8 +663,9 @@ export class PdfAnalyzer {
 
         for (let idx = 0; idx < imageBoxes.length; idx++) {
           const box = imageBoxes[idx];
+          const srcPng = (await getTextStrippedPagePng(pageNum - 1)) ?? pagePreviews[pageNum - 1];
           const croppedBase64 = await this.cropPageRegionToBase64(
-            pagePreviews[pageNum - 1],
+            srcPng,
             box,
             widthIn,
             heightIn
@@ -235,15 +694,78 @@ export class PdfAnalyzer {
           (item) => typeof item.str === 'string' && item.str.trim().length > 0
         );
 
-        const mergedLines = this.mergeTextSpansOnSameBaseline(
+        const enrichedStyles: Record<string, { fontFamily?: string }> = {
+          ...(textContent.styles ?? {}),
+        };
+        for (const item of rawItems) {
+          if (!item.fontName) continue;
+          try {
+            if (page.commonObjs.has(item.fontName)) {
+              const fontObj = page.commonObjs.get(item.fontName) as { name?: string } | undefined;
+              if (fontObj?.name) {
+                const prevFamily = enrichedStyles[item.fontName]?.fontFamily ?? '';
+                enrichedStyles[item.fontName] = {
+                  fontFamily: `${fontObj.name} ${prevFamily}`.trim(),
+                };
+              }
+            }
+          } catch {
+            // Ignore unresolved pdfjs commonObjs font entries
+          }
+        }
+
+        const {
+          mergedLines,
+          brokenGlyphSpans,
+          deduplicatedSpans,
+        } = this.extractNormalizedTextLines(
           rawItems,
           viewport.height,
-          textContent.styles ?? {},
-          textColorEvents
+          enrichedStyles,
+          textColorEvents,
+          vectorRects
         );
 
-        // Filter out curved graphic clusters that enclose dense text (likely rounded UI cards/sections already captured as vector+text)
-        const iconClusters = complexClusterBoxes.filter((box) => {
+        let brokenGlyphRegions = 0;
+        for (let idx = 0; idx < brokenGlyphSpans.length; idx++) {
+          const bSpan = brokenGlyphSpans[idx];
+          const padIn = 0.008;
+          const cropBox = {
+            x: Math.max(0, bSpan.x - padIn),
+            y: Math.max(0, bSpan.y - padIn),
+            width: Math.min(widthIn - Math.max(0, bSpan.x - padIn), bSpan.width + padIn * 2),
+            height: Math.min(heightIn - Math.max(0, bSpan.y - padIn), bSpan.height + padIn * 2),
+          };
+          const croppedBase64 = await this.cropPageRegionToBase64(
+            pagePreviews[pageNum - 1],
+            cropBox,
+            widthIn,
+            heightIn
+          );
+          if (!croppedBase64) continue;
+          brokenGlyphRegions++;
+          regions.push({
+            id: `region-${String(regionSeq++).padStart(4, '0')}`,
+            pageNumber: pageNum,
+            type: 'image',
+            x: roundIn(cropBox.x),
+            y: roundIn(cropBox.y),
+            width: roundIn(cropBox.width),
+            height: roundIn(cropBox.height),
+            style: defaultStyle(),
+            semanticRole: 'logoOrGraphic',
+            confidence: 0.99,
+            bandKind: classifyBandHeuristic(cropBox.y, heightIn),
+            isAmbiguous: false,
+            preferImageFallback: true,
+            imageAssetBase64: croppedBase64,
+            imageAssetName: `GlyphCrop_P${pageNum}_${brokenGlyphRegions}`,
+            sourceObjectRefs: [`p${pageNum}-glyph-${brokenGlyphRegions}`],
+          });
+        }
+
+        const iconClusters: Array<{ x: number; y: number; width: number; height: number; fallbackRect?: RawVectorRect }> = [];
+        for (const box of complexClusterBoxes) {
           const enclosedText = mergedLines.filter(
             (ln) =>
               ln.x >= box.x - 0.08 &&
@@ -251,15 +773,62 @@ export class PdfAnalyzer {
               ln.y >= box.y - 0.08 &&
               ln.y + ln.height <= box.y + box.height + 0.08
           );
-          if (box.width > 2.2 && enclosedText.length >= 2) return false;
-          if (enclosedText.length >= 4) return false;
-          return true;
-        });
+          const overlapsText = mergedLines.some(
+            (ln) =>
+              ln.x < box.x + box.width + 0.02 &&
+              ln.x + ln.width > box.x - 0.02 &&
+              ln.y < box.y + box.height + 0.02 &&
+              ln.y + ln.height > box.y - 0.02
+          );
+          const isTopCoverBanner = box.y < 1.8 && box.width > 2.0 && box.height >= 0.4;
+          // Filter out multi-line rounded-corner text containers unless fallbackRect converts them to native rectangles
+          if (!isTopCoverBanner && ((box.width > 2.2 && enclosedText.length >= 2) || enclosedText.length >= 4)) {
+            if (box.fallbackRect) {
+              const fb = box.fallbackRect;
+              const isLine = fb.height <= 0.04 || fb.width <= 0.04;
+              regions.push({
+                id: `region-${String(regionSeq++).padStart(4, '0')}`,
+                pageNumber: pageNum,
+                type: isLine ? 'vector_line' : 'vector_rect',
+                x: roundIn(fb.x),
+                y: roundIn(fb.y),
+                width: roundIn(Math.max(0.015, fb.width)),
+                height: roundIn(Math.max(0.015, fb.height)),
+                style: {
+                  ...defaultStyle(),
+                  backgroundColor: fb.fillColor,
+                  borderColor: fb.strokeColor,
+                  borderWidthPt: fb.lineWidthPt,
+                },
+                semanticRole: 'unknown',
+                confidence: 0.9,
+                bandKind: classifyBandHeuristic(fb.y, heightIn),
+                isAmbiguous: false,
+                sourceObjectRefs: [`p${pageNum}-vc-rect`],
+              });
+            }
+            continue;
+          }
+          // Skip tiny curves that were merely curved vector glyphs inside or adjacent to normal text when there's no banner fill
+          if (overlapsText && box.width < 0.45 && box.height < 0.45 && enclosedText.length === 0) {
+            // Keep standalone timeline dots/icons that sit outside text line boxes
+            const strictlyInsideLine = mergedLines.some(
+              (ln) =>
+                box.x >= ln.x - 0.01 &&
+                box.x + box.width <= ln.x + ln.width + 0.01 &&
+                box.y >= ln.y - 0.01 &&
+                box.y + box.height <= ln.y + ln.height + 0.01
+            );
+            if (strictlyInsideLine) continue;
+          }
+          iconClusters.push(box);
+        }
 
         for (let idx = 0; idx < iconClusters.length; idx++) {
           const box = iconClusters[idx];
+          const srcPng = (await getTextStrippedPagePng(pageNum - 1)) ?? pagePreviews[pageNum - 1];
           const croppedBase64 = await this.cropPageRegionToBase64(
-            pagePreviews[pageNum - 1],
+            srcPng,
             box,
             widthIn,
             heightIn
@@ -288,7 +857,6 @@ export class PdfAnalyzer {
         for (let idx = 0; idx < mergedLines.length; idx++) {
           const line = mergedLines[idx];
           const bandKind = classifyBandHeuristic(line.y, heightIn);
-          const fontInfo = inferFontFlags(line.fontName, line.fontLoadedName);
           const enclosingRect = vectorRects
             .filter(
               (r) =>
@@ -301,38 +869,20 @@ export class PdfAnalyzer {
             )
             .sort((a, b) => a.width * a.height - b.width * b.height)[0];
 
-          let textAlign: 'Left' | 'Center' | 'Right' = 'Left';
-          if (enclosingRect && enclosingRect.width > 0.8) {
-            const lineCenter = line.x + line.width / 2;
-            const rectCenter = enclosingRect.x + enclosingRect.width / 2;
-            if (Math.abs(lineCenter - rectCenter) <= 0.18 && line.width < enclosingRect.width * 0.88) {
-              textAlign = 'Center';
-            } else if (
-              enclosingRect.x + enclosingRect.width - (line.x + line.width) <= 0.16 &&
-              line.x - enclosingRect.x > 0.25
-            ) {
-              textAlign = 'Right';
-            }
-          } else if (
-            Math.abs(line.x + line.width / 2 - widthIn / 2) <= 0.2 &&
-            line.width < widthIn * 0.72 &&
-            bandKind === 'Header'
-          ) {
-            textAlign = 'Center';
-          }
-
+          const textAlign: 'Left' | 'Center' | 'Right' = 'Left';
           const style: RegionStyle = {
-            fontFamily: fontInfo.family,
+            fontFamily: line.fontFamily,
             fontSizePt: Math.round(line.fontSizePt * 10) / 10,
-            bold: fontInfo.bold,
-            italic: fontInfo.italic,
+            bold: line.bold,
+            italic: line.italic,
+            underline: line.underline,
             color: line.color,
             backgroundColor: enclosingRect?.fillColor,
             borderColor: enclosingRect?.strokeColor,
             borderWidthPt: enclosingRect?.lineWidthPt,
             textAlign,
-            verticalAlign: 'Middle',
-            paddingPt: { top: 2, right: 4, bottom: 2, left: 4 },
+            verticalAlign: 'Top',
+            paddingPt: { top: 0, right: 0, bottom: 0, left: 0 },
           };
 
           regions.push({
@@ -342,11 +892,12 @@ export class PdfAnalyzer {
             x: roundIn(line.x),
             y: roundIn(line.y),
             width: roundIn(Math.max(0.08, line.width)),
-            height: roundIn(Math.max(0.14, line.height)),
+            height: roundIn(Math.max(0.08, line.height)),
             text: line.text,
+            runs: line.runs,
             style,
             semanticRole: 'unknown',
-            confidence: 0.7,
+            confidence: 0.92,
             bandKind,
             isAmbiguous: false,
             sourceObjectRefs: [`p${pageNum}-txt-${idx}`],
@@ -357,6 +908,9 @@ export class PdfAnalyzer {
         this.logger.info('PdfAnalysis', `Page ${pageNum} analyzed`, {
           rawObjects: rawObjectCount,
           normalizedRegions: regions.length,
+          localizedGraphics: imageBoxes.length + iconClusters.length,
+          brokenGlyphRegions,
+          deduplicatedSpans,
         });
 
         pages.push({
@@ -367,6 +921,8 @@ export class PdfAnalyzer {
           regions,
           bands: [],
           rasterPreviewBase64: pagePreviews[pageNum - 1]?.toString('base64'),
+          brokenGlyphRegions,
+          deduplicatedSpans,
         });
       }
 
@@ -378,7 +934,7 @@ export class PdfAnalyzer {
           pageWidth: firstPage.width,
           pageHeight: firstPage.height,
           unit: 'inch',
-          extractedAt: new Date().toISOString(),
+          extractedAt: 'deterministic',
         },
         pages,
       };
@@ -389,25 +945,35 @@ export class PdfAnalyzer {
     }
   }
 
-  private mergeTextSpansOnSameBaseline(
+  private extractNormalizedTextLines(
     items: PdfTextItem[],
     pageHeightPt: number,
     styles: Record<string, { fontFamily?: string }>,
-    textColorEvents: TextColorEvent[]
-  ): Array<{
-    text: string;
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    fontSizePt: number;
-    fontName: string;
-    fontLoadedName?: string;
-    color: string;
-  }> {
+    textColorEvents: TextColorEvent[],
+    vectorRects: RawVectorRect[]
+  ): {
+    mergedLines: MergedTextLine[];
+    brokenGlyphSpans: NormalizedSpan[];
+    deduplicatedSpans: number;
+  } {
     const matchTextColor = (x: number, y: number): string => {
+      let sameLineColor: string | undefined;
+      let sameLineScore = Infinity;
+      for (const ev of textColorEvents) {
+        if (Math.abs(ev.y - y) <= 0.045) {
+          const dx = Math.abs(ev.x - x);
+          const score = ev.x <= x + 0.05 ? dx : dx + 0.4;
+          if (score < sameLineScore) {
+            sameLineScore = score;
+            sameLineColor = ev.color;
+          }
+        }
+      }
+      if (sameLineColor && sameLineScore <= 7.8) {
+        return sameLineColor;
+      }
       let bestColor = '#0F172A';
-      let bestDist = 0.25;
+      let bestDist = 0.35;
       for (const ev of textColorEvents) {
         const d = Math.hypot(ev.x - x, ev.y - y);
         if (d < bestDist) {
@@ -418,7 +984,16 @@ export class PdfAnalyzer {
       return bestColor;
     };
 
-    const normalized = items.map((it) => {
+    const thinHorizLines = vectorRects.filter((r) => r.height <= 0.03 && r.width >= 0.1);
+    const hasUnderlineBelow = (x: number, yBottom: number, width: number): boolean => {
+      return thinHorizLines.some((ln) => {
+        if (Math.abs(ln.y - yBottom) > 0.045) return false;
+        const overlap = Math.min(x + width, ln.x + ln.width) - Math.max(x, ln.x);
+        return overlap >= Math.min(width, ln.width) * 0.72;
+      });
+    };
+
+    const rawSpans: NormalizedSpan[] = items.map((it) => {
       const tx = it.transform;
       const fontSizePt = Math.max(5.5, Math.hypot(tx[0], tx[1]) || Math.hypot(tx[2], tx[3]) || 10);
       const xPt = tx[4];
@@ -427,42 +1002,184 @@ export class PdfAnalyzer {
       const wPt = Math.max(it.width || it.str.length * fontSizePt * 0.5, 4);
       const hPt = Math.max(it.height || fontSizePt * 1.2, fontSizePt * 1.15);
       const xIn = xPt / PT_PER_INCH;
+      const yIn = Math.max(0, yTopPt / PT_PER_INCH);
+      const widthIn = wPt / PT_PER_INCH;
+      const heightIn = hPt / PT_PER_INCH;
+      const loadedName = styles[it.fontName]?.fontFamily;
+      const flags = inferFontFlags(it.fontName, loadedName);
+      const normText = normalizeLigatures(it.str);
       return {
-        text: it.str,
+        text: normText,
         x: xIn,
-        y: Math.max(0, yTopPt / PT_PER_INCH),
-        width: wPt / PT_PER_INCH,
-        height: hPt / PT_PER_INCH,
+        y: yIn,
+        baselineY: yBaselineIn,
+        width: widthIn,
+        height: heightIn,
         fontSizePt,
         fontName: it.fontName,
-        fontLoadedName: styles[it.fontName]?.fontFamily,
+        fontLoadedName: loadedName,
+        fontFamily: flags.family,
+        bold: flags.bold,
+        italic: flags.italic,
+        underline: hasUnderlineBelow(xIn, yBaselineIn + 0.02, widthIn),
         color: matchTextColor(xIn, yBaselineIn),
+        brokenGlyph: hasBrokenGlyphs(normText),
       };
     });
 
-    normalized.sort((a, b) => (Math.abs(a.y - b.y) < 0.04 ? a.x - b.x : a.y - b.y));
+    const brokenGlyphSpans = rawSpans.filter((s) => s.brokenGlyph);
+    const cleanSpans = rawSpans.filter((s) => !s.brokenGlyph);
 
-    const merged: typeof normalized = [];
-    for (const cur of normalized) {
-      const prev = merged[merged.length - 1];
-      if (
-        prev &&
-        Math.abs(prev.y - cur.y) <= 0.04 &&
-        cur.x - (prev.x + prev.width) >= -0.04 &&
-        cur.x - (prev.x + prev.width) <= 0.12 &&
-        Math.abs(prev.fontSizePt - cur.fontSizePt) <= 1.2 &&
-        prev.color === cur.color
-      ) {
-        const gap = cur.x - (prev.x + prev.width);
-        const spacer = gap > 0.025 && !prev.text.endsWith(' ') && !cur.text.startsWith(' ') ? ' ' : '';
-        prev.text = `${prev.text}${spacer}${cur.text}`.replace(/\s+/g, ' ').trim();
-        prev.width = Math.max(prev.width, cur.x + cur.width - prev.x);
-        prev.height = Math.max(prev.height, cur.height);
+    cleanSpans.sort((a, b) => (Math.abs(a.baselineY - b.baselineY) <= 0.028 ? a.x - b.x : a.baselineY - b.baselineY));
+
+    // Step A: Deduplicate fake-bold / double-stroked / stacked duplicate spans
+    const dedupedSpans: NormalizedSpan[] = [];
+    let deduplicatedSpans = 0;
+    for (const cur of cleanSpans) {
+      const curTrim = cur.text.trim();
+      const maxVertDup = Math.max(0.025, (cur.fontSizePt / PT_PER_INCH) * 0.72);
+      const dup = dedupedSpans.find(
+        (prev) =>
+          prev.text.trim() === curTrim &&
+          Math.abs(prev.x - cur.x) <= 0.025 &&
+          Math.abs(prev.baselineY - cur.baselineY) <= maxVertDup &&
+          Math.abs(prev.fontSizePt - cur.fontSizePt) <= 0.8 &&
+          prev.color === cur.color
+      );
+      if (dup) {
+        dup.bold = true;
+        deduplicatedSpans++;
       } else {
-        merged.push({ ...cur, text: cur.text.trim() });
+        dedupedSpans.push({ ...cur });
       }
     }
-    return merged;
+
+    // Build vertical edge barriers from vector lines & bordered/filled rectangles so justified prose merges cleanly inside cards/columns without crossing column/cell boundaries
+    const verticalBarriers: Array<{ x: number; y1: number; y2: number }> = [];
+    for (const vr of vectorRects) {
+      if (vr.width <= 0.05 && vr.height >= 0.10) {
+        verticalBarriers.push({ x: vr.x + vr.width / 2, y1: vr.y, y2: vr.y + vr.height });
+      } else if (vr.width >= 0.2 && vr.height >= 0.14 && (vr.fillColor || vr.strokeColor)) {
+        verticalBarriers.push({ x: vr.x, y1: vr.y, y2: vr.y + vr.height });
+        verticalBarriers.push({ x: vr.x + vr.width, y1: vr.y, y2: vr.y + vr.height });
+      }
+    }
+    const crossesVerticalBarrier = (xLeft: number, xRight: number, yTop: number, yBot: number): boolean => {
+      const yMid = (yTop + yBot) / 2;
+      return verticalBarriers.some(
+        (vb) => vb.x >= xLeft - 0.015 && vb.x <= xRight + 0.015 && yMid >= vb.y1 - 0.04 && yMid <= vb.y2 + 0.04
+      );
+    };
+
+    // Step B: Merge contiguous horizontal spans sharing the same baseline into inline VisualTextRuns
+    const mergedLines: MergedTextLine[] = [];
+    for (const cur of dedupedSpans) {
+      const prev = mergedLines[mergedLines.length - 1];
+      const gap = prev ? cur.x - (prev.x + prev.width) : Infinity;
+
+      const prevBaselineY = prev ? prev.y + (prev.fontSizePt * 0.85) / PT_PER_INCH : 0;
+      const curTrim = cur.text.trim();
+      const prevTrim = prev ? prev.text.trim() : '';
+
+      const sameBaselineY = prev && Math.abs(prevBaselineY - cur.baselineY) <= 0.028;
+      const blockedByColon = Boolean(prev && prevTrim.endsWith(':') && gap > 0.07);
+      const blockedByTableNumericGutter = Boolean(
+        prev &&
+          gap > 0.115 &&
+          (/^[0-9.,Rp%\-$€£()+\/]+$/i.test(curTrim) || /^Plan\s+\d+/i.test(curTrim)) &&
+          (/^[0-9.,Rp%\-$€£()+\/]+$/i.test(prevTrim) || prevTrim.length <= 20)
+      );
+      const isHangingMarker = /^(?:\d{1,2}\.|[a-z]\.|[•●○▪▫■□‣⁃-])$/i.test(prevTrim);
+      const blockedByHangingMarker = Boolean(prev && isHangingMarker && gap > 0.045);
+      const blockedByBarrier = Boolean(
+        prev &&
+          gap > 0.04 &&
+          crossesVerticalBarrier(
+            prev.x + prev.width,
+            cur.x,
+            Math.min(prev.y, cur.y),
+            Math.max(prev.y + prev.height, cur.y + cur.height)
+          )
+      );
+
+      const sameBaseline =
+        Boolean(sameBaselineY) &&
+        gap >= -0.035 &&
+        gap <= 0.22 &&
+        Math.abs(prev!.fontSizePt - cur.fontSizePt) <= 2.2 &&
+        !blockedByColon &&
+        !blockedByTableNumericGutter &&
+        !blockedByHangingMarker &&
+        !blockedByBarrier;
+
+      if (sameBaseline && prev) {
+        const lastRun = prev.runs[prev.runs.length - 1];
+        const needsSpace =
+          gap > 0.022 &&
+          !lastRun.text.endsWith(' ') &&
+          !cur.text.startsWith(' ');
+        const spacer = needsSpace ? ' ' : '';
+
+        const sameRunStyle =
+          lastRun.fontFamily === cur.fontFamily &&
+          Math.abs(lastRun.fontSizePt - cur.fontSizePt) <= 0.3 &&
+          lastRun.bold === cur.bold &&
+          lastRun.italic === cur.italic &&
+          Boolean(lastRun.underline) === cur.underline &&
+          lastRun.color === cur.color;
+
+        if (sameRunStyle) {
+          lastRun.text = `${lastRun.text}${spacer}${cur.text}`.replace(/ {2,}/g, ' ');
+        } else {
+          if (spacer && !lastRun.text.endsWith(' ')) {
+            lastRun.text = `${lastRun.text} `;
+          }
+          prev.runs.push({
+            text: cur.text.replace(/^ +/, needsSpace ? '' : ' '),
+            fontFamily: cur.fontFamily,
+            fontSizePt: Math.round(cur.fontSizePt * 10) / 10,
+            bold: cur.bold,
+            italic: cur.italic,
+            underline: cur.underline || undefined,
+            color: cur.color,
+          });
+        }
+
+        prev.text = prev.runs.map((r) => r.text).join('').trim();
+        prev.width = Math.max(prev.width, cur.x + cur.width - prev.x);
+        prev.height = Math.max(prev.height, cur.height);
+        prev.y = Math.min(prev.y, cur.y);
+      } else {
+        const initialText = cur.text.trim();
+        if (!initialText) continue;
+        mergedLines.push({
+          text: initialText,
+          runs: [
+            {
+              text: initialText,
+              fontFamily: cur.fontFamily,
+              fontSizePt: Math.round(cur.fontSizePt * 10) / 10,
+              bold: cur.bold,
+              italic: cur.italic,
+              underline: cur.underline || undefined,
+              color: cur.color,
+            },
+          ],
+          x: cur.x,
+          y: cur.y,
+          width: cur.width,
+          height: cur.height,
+          fontSizePt: cur.fontSizePt,
+          fontFamily: cur.fontFamily,
+          bold: cur.bold,
+          italic: cur.italic,
+          underline: cur.underline,
+          color: cur.color,
+        });
+      }
+    }
+
+    return { mergedLines, brokenGlyphSpans, deduplicatedSpans };
   }
 
   private extractVectorsAndImages(
@@ -473,13 +1190,13 @@ export class PdfAnalyzer {
   ): {
     vectorRects: RawVectorRect[];
     imageBoxes: Array<{ x: number; y: number; width: number; height: number }>;
-    complexClusterBoxes: Array<{ x: number; y: number; width: number; height: number }>;
+    complexClusterBoxes: Array<{ x: number; y: number; width: number; height: number; fallbackRect?: RawVectorRect }>;
     textColorEvents: TextColorEvent[];
   } {
     const OPS = pdfjsLib.OPS;
     const vectorRects: RawVectorRect[] = [];
     const imageBoxes: Array<{ x: number; y: number; width: number; height: number }> = [];
-    const curveBoxes: Array<{ x: number; y: number; width: number; height: number }> = [];
+    const curveBoxes: Array<{ x: number; y: number; width: number; height: number; fallbackRect?: RawVectorRect }> = [];
     const textColorEvents: TextColorEvent[] = [];
 
     interface GState {
@@ -541,7 +1258,6 @@ export class PdfAnalyzer {
 
         if (w <= 0.008 && h <= 0.008) continue;
 
-        // Skip full-page white backdrop
         if (
           w > pageWidthIn - 0.15 &&
           h > pageHeightIn - 0.15 &&
@@ -551,8 +1267,25 @@ export class PdfAnalyzer {
         }
 
         if (sp.hasCurves) {
-          if (w >= 0.1 && h >= 0.1 && w <= 3.5 && h <= 3.5) {
-            curveBoxes.push({ x: Math.max(0, minX), y: Math.max(0, minY), width: w, height: h });
+          if (w >= 0.04 && h >= 0.04 && w <= pageWidthIn + 0.1 && h <= 4.5 && (hasFill || hasStroke)) {
+            curveBoxes.push({
+              x: Math.max(0, minX),
+              y: Math.max(0, minY),
+              width: Math.min(pageWidthIn - Math.max(0, minX), w),
+              height: h,
+              fallbackRect:
+                w > 0.2 && h > 0.12
+                  ? {
+                      x: Math.max(0, minX),
+                      y: Math.max(0, minY),
+                      width: Math.min(pageWidthIn - Math.max(0, minX), w),
+                      height: h,
+                      fillColor: hasFill ? fillCol : undefined,
+                      strokeColor: hasStroke ? strokeCol : undefined,
+                      lineWidthPt: lw,
+                    }
+                  : undefined,
+            });
           } else if (w > 0.2 && h > 0.12 && (hasFill || hasStroke)) {
             vectorRects.push({
               x: Math.max(0, minX),
@@ -569,11 +1302,12 @@ export class PdfAnalyzer {
 
         const isThinLine = h <= 0.035 || w <= 0.035;
         if (isThinLine) {
+          const lineThicknessIn = Math.max(0.005, lw / PT_PER_INCH);
           vectorRects.push({
             x: Math.max(0, minX),
             y: Math.max(0, minY),
-            width: Math.max(0.015, w),
-            height: Math.max(0.015, h),
+            width: w <= 0.035 ? Math.max(lineThicknessIn, w) : w,
+            height: h <= 0.035 ? Math.max(lineThicknessIn, h) : h,
             strokeColor: hasStroke ? strokeCol : fillCol,
             fillColor: hasFill ? fillCol : undefined,
             lineWidthPt: lw,
@@ -675,7 +1409,6 @@ export class PdfAnalyzer {
           color: gs.fillColor ?? '#0F172A',
         });
       } else if (fn === OPS.constructPath && typeof args[0] === 'number') {
-        // pdfjs-dist v6 format: [paintOp, [Float32Array of sub-ops+coords], Float32Array bbox]
         const paintOp = args[0] as number;
         const hasFill =
           paintOp === OPS.fill ||
@@ -697,7 +1430,6 @@ export class PdfAnalyzer {
           while (k < rawBuf.length) {
             const code = rawBuf[k++];
             if (code === 0 && k + 1 < rawBuf.length) {
-              // MOVE_TO
               if (active && active.pts.length >= 2) subpaths.push(active);
               const [px, py] = applyCtm(ctm, Number(rawBuf[k]), Number(rawBuf[k + 1]));
               active = {
@@ -706,27 +1438,23 @@ export class PdfAnalyzer {
               };
               k += 2;
             } else if (code === 1 && k + 1 < rawBuf.length) {
-              // LINE_TO
               const [px, py] = applyCtm(ctm, Number(rawBuf[k]), Number(rawBuf[k + 1]));
               if (!active) active = { pts: [], hasCurves: false };
               active.pts.push({ x: px / PT_PER_INCH, y: (pageHeightPt - py) / PT_PER_INCH });
               k += 2;
             } else if (code === 2 && k + 5 < rawBuf.length) {
-              // CURVE_TO (6 args)
               const [px, py] = applyCtm(ctm, Number(rawBuf[k + 4]), Number(rawBuf[k + 5]));
               if (!active) active = { pts: [], hasCurves: false };
               active.hasCurves = true;
               active.pts.push({ x: px / PT_PER_INCH, y: (pageHeightPt - py) / PT_PER_INCH });
               k += 6;
             } else if (code === 3 && k + 3 < rawBuf.length) {
-              // QUADRATIC_TO (4 args)
               const [px, py] = applyCtm(ctm, Number(rawBuf[k + 2]), Number(rawBuf[k + 3]));
               if (!active) active = { pts: [], hasCurves: false };
               active.hasCurves = true;
               active.pts.push({ x: px / PT_PER_INCH, y: (pageHeightPt - py) / PT_PER_INCH });
               k += 4;
             } else if (code === 4) {
-              // CLOSE_PATH
               if (active && active.pts.length >= 2) subpaths.push(active);
               active = null;
             } else {
@@ -836,11 +1564,12 @@ export class PdfAnalyzer {
           const w = Math.abs(ln.x2 - ln.x1);
           const h = Math.abs(ln.y2 - ln.y1);
           if (w > 0.05 || h > 0.05) {
+            const lineThicknessIn = Math.max(0.005, gs.lineWidthPt / PT_PER_INCH);
             vectorRects.push({
               x: Math.max(0, Math.min(ln.x1, ln.x2)),
               y: Math.max(0, Math.min(ln.y1, ln.y2)),
-              width: Math.max(0.015, w),
-              height: Math.max(0.015, h),
+              width: w <= 0.035 ? Math.max(lineThicknessIn, w) : w,
+              height: h <= 0.035 ? Math.max(lineThicknessIn, h) : h,
               strokeColor: hasStroke ? gs.strokeColor : gs.fillColor,
               lineWidthPt: gs.lineWidthPt,
             });
@@ -869,8 +1598,13 @@ export class PdfAnalyzer {
       }
     }
 
-    // Merge nearby/overlapping curved graphics into tight icon/badge clusters
-    const complexClusterBoxes: Array<{ x: number; y: number; width: number; height: number }> = [];
+    const complexClusterBoxes: Array<{
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      fallbackRect?: RawVectorRect;
+    }> = [];
     const pad = 0.12;
     for (const cb of curveBoxes) {
       const merged = complexClusterBoxes.find(
@@ -889,6 +1623,7 @@ export class PdfAnalyzer {
         merged.y = y1;
         merged.width = x2 - x1;
         merged.height = y2 - y1;
+        if (!merged.fallbackRect && cb.fallbackRect) merged.fallbackRect = cb.fallbackRect;
       } else {
         complexClusterBoxes.push({ ...cb });
       }
@@ -898,13 +1633,17 @@ export class PdfAnalyzer {
       vectorRects,
       imageBoxes,
       complexClusterBoxes: complexClusterBoxes.filter(
-        (b) => b.width >= 0.18 && b.height >= 0.18 && b.width <= 3.6 && b.height <= 3.6
+        (b) =>
+          Math.max(b.width, b.height) >= 0.14 &&
+          Math.min(b.width, b.height) >= 0.08 &&
+          b.width <= pageWidthIn + 0.05 &&
+          b.height <= 4.5
       ),
       textColorEvents,
     };
   }
 
-  public async rasterizePagesWithGhostscript(pdfBytes: Uint8Array, dpi = 144): Promise<Buffer[]> {
+  public async rasterizePagesWithGhostscript(pdfBytes: Uint8Array, dpi = 150): Promise<Buffer[]> {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reportgen-gs-'));
     const inputPath = path.join(tmpDir, 'input.pdf');
     const outPattern = path.join(tmpDir, 'page-%03d.png');
