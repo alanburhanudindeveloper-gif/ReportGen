@@ -137,6 +137,8 @@ async function startServer() {
           ? new Uint8Array(files.comparisonPdf[0].buffer)
           : undefined;
 
+        const schemaVersion = req.body?.schemaVersion === '2016' ? '2016' : '2008';
+
         const config = loadConfig();
         const services = createReportGenServices(config, false);
         const agent = new ReportGenAgent(services);
@@ -150,6 +152,7 @@ async function startServer() {
           existingVbFileName,
           excelBytes,
           comparisonPdfBytes,
+          schemaVersion,
         });
 
         return res.json(result);

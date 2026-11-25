@@ -3,6 +3,7 @@ import {
   ExistingProjectPattern,
   LogicTestCase,
   PipelineRunResult,
+  RdlcSchemaVersion,
   StructuredLogger,
 } from '../core/types.ts';
 import { ReportGenServices } from '../mcp/mcpTools.ts';
@@ -18,6 +19,7 @@ export interface AgentRunInput {
   excelBytes?: Buffer;
   customJsonTestCases?: LogicTestCase[];
   comparisonPdfBytes?: Uint8Array;
+  schemaVersion?: RdlcSchemaVersion;
 }
 
 /**
@@ -36,6 +38,7 @@ export class ReportGenAgent {
   }
 
   public async execute(input: AgentRunInput): Promise<PipelineRunResult> {
+    const schemaVersion: RdlcSchemaVersion = input.schemaVersion === '2016' ? '2016' : '2008';
     const runId = crypto
       .createHash('sha256')
       .update(`${input.documentName}:${input.pdfBytes.byteLength}`)
@@ -69,33 +72,39 @@ export class ReportGenAgent {
 
     // Step 4: Deterministic Dual-Layer Hybrid + Repeating Tablix generation & validation loop
     const rdlcValidator = new RdlcValidator(this.logger);
+    const validateOpts = {
+      requireRdlc2008: schemaVersion === '2008',
+      strictCompiled2008: schemaVersion === '2008',
+    };
     let iterations = 0;
     let reportDefinition = this.services.tablixBuilder.buildReportDefinition(
       layoutModel,
-      existingPattern
+      existingPattern,
+      schemaVersion
     );
     let vbArtifacts = this.services.vbGenerator.generate(reportDefinition, existingPattern);
     let rdlcXml = this.services.rdlcGenerator.generate(
       reportDefinition,
       vbArtifacts.embeddedRdlcCode,
-      { schemaVersion: '2016' }
+      { schemaVersion }
     );
-    let rdlcValidation = rdlcValidator.validate(rdlcXml);
+    let rdlcValidation = rdlcValidator.validate(rdlcXml, validateOpts);
 
     while (!rdlcValidation.valid && iterations < config.validation.maxAgentIterations - 1) {
       iterations++;
       this.logger.warn('DeterministicGate', `Validation gate triggered retry iteration ${iterations}`);
       reportDefinition = this.services.tablixBuilder.buildReportDefinition(
         layoutModel,
-        existingPattern
+        existingPattern,
+        schemaVersion
       );
       vbArtifacts = this.services.vbGenerator.generate(reportDefinition, existingPattern);
       rdlcXml = this.services.rdlcGenerator.generate(
         reportDefinition,
         vbArtifacts.embeddedRdlcCode,
-        { schemaVersion: '2016' }
+        { schemaVersion }
       );
-      rdlcValidation = rdlcValidator.validate(rdlcXml);
+      rdlcValidation = rdlcValidator.validate(rdlcXml, validateOpts);
     }
 
     const rdlcSha256 = crypto.createHash('sha256').update(rdlcXml, 'utf-8').digest('hex');
@@ -142,6 +151,8 @@ export class ReportGenAgent {
     // Final 15-Point Gate: validate XML structure + runtime page parity, 0 collisions, and 95%+ per-page parity
     const targetPct = Math.round((config.validation.visualSimilarityTarget ?? 0.95) * 10000) / 100;
     rdlcValidation = rdlcValidator.validate(rdlcXml, {
+      requireRdlc2008: schemaVersion === '2008',
+      strictCompiled2008: schemaVersion === '2008',
       context: {
         sourcePageCount: layoutModel.document.pageCount,
         renderedPageCount: previewHtml.pageCount,
@@ -254,6 +265,8 @@ export class ReportGenAgent {
       }
     }
 
+    const hasArchetypes = archetypes.A + archetypes.B + archetypes.C + archetypes.D > 0;
+
     const conversionMetrics = {
       textboxes:
         bodyTablixes.length > 0 || bodySections.length > 0
@@ -288,7 +301,7 @@ export class ReportGenAgent {
       printOnFirstPage: reportDefinition.pageHeaderSpec?.printOnFirstPage ?? false,
       nativeHeaderPresent: Boolean(reportDefinition.pageHeaderSpec),
       nativeFooterPresent: Boolean(reportDefinition.pageFooterSpec),
-      archetypes,
+      archetypes: hasArchetypes ? archetypes : undefined,
       collisionsCount: previewHtml.collisions.length,
       renderedPageCount: previewHtml.pageCount,
     };
@@ -315,7 +328,7 @@ export class ReportGenAgent {
       runId,
       documentName: input.documentName,
       rdlcSha256,
-      rdlcSchemaVersion: '2016',
+      rdlcSchemaVersion: schemaVersion,
       conversionMetrics,
       layoutModel,
       existingPattern,

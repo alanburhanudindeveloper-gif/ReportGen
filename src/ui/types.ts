@@ -46,6 +46,17 @@ export interface FrontendBand {
   }>;
 }
 
+export interface FrontendVectorPrimitives {
+  unit: 'pt';
+  pageWidthPt: number;
+  pageHeightPt: number;
+  hLines: Array<{ x1: number; y: number; x2: number; strokeColor?: string; lineWidthPt: number }>;
+  vLines: Array<{ x: number; y1: number; y2: number; strokeColor?: string; lineWidthPt: number }>;
+  fillBoxes: Array<{ x: number; y: number; width: number; height: number; fillHex: string; strokeColor?: string; lineWidthPt?: number }>;
+  fillBanners?: Array<{ x: number; y: number; width: number; height: number; fillHex: string; strokeColor?: string; lineWidthPt?: number }>;
+  fillBands?: Array<{ x: number; y: number; width: number; height: number; fillHex: string; strokeColor?: string; lineWidthPt?: number }>;
+}
+
 export interface FrontendLayoutPage {
   pageNumber: number;
   width: number;
@@ -53,6 +64,7 @@ export interface FrontendLayoutPage {
   rawObjectCount: number;
   regions: FrontendLayoutRegion[];
   bands: FrontendBand[];
+  vectorPrimitives?: FrontendVectorPrimitives;
   rasterPreviewBase64?: string;
 }
 
@@ -141,6 +153,12 @@ export interface FrontendPipelineResult {
     dataSetName: string;
     pageWidthIn: number;
     pageHeightIn: number;
+    marginsIn?: {
+      top: number;
+      right: number;
+      bottom: number;
+      left: number;
+    };
     fields: Array<{ name: string; dataType: string; sampleValue: string | number; isCalculated: boolean }>;
     parameters: Array<{ name: string; dataType: string; prompt: string; defaultValue?: string; matchedPattern?: string; pageNumber?: number }>;
     calculations: Array<{ functionName: string; targetField: string; expressionSummary: string }>;

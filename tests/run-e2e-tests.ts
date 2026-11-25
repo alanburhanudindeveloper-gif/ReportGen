@@ -72,6 +72,7 @@ async function runTests() {
     existingVbSource: SAMPLE_EXISTING_VB,
     existingVbFileName: 'ExistingReport.vb',
     excelBytes,
+    schemaVersion: '2016' as const,
   };
   const result = await agent.execute(req);
   const result2 = await agent.execute(req);
@@ -146,6 +147,7 @@ async function runTests() {
     const realResult = await agent.execute({
       documentName: 'RIPLAY_Hospital_Cash_Plan',
       pdfBytes: realPdfBytes,
+      schemaVersion: '2016',
     });
     assert.strictEqual(realResult.rdlcValidation.checkedRules, 15, 'RIPLAY must run full 15-point RDLC validation');
     assert.strictEqual(realResult.rdlcValidation.valid, true, `Real RIPLAY PDF RDLC must pass 15-point validation: ${JSON.stringify(realResult.rdlcValidation.errors)}`);

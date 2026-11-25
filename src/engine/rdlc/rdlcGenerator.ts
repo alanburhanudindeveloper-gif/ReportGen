@@ -67,8 +67,8 @@ export class RdlcGenerator {
     options?: { schemaVersion?: '2008' | '2016' }
   ): string {
     try {
-      const schemaVersion = options?.schemaVersion ?? '2016';
-      const useCm = schemaVersion === '2016';
+      const schemaVersion = options?.schemaVersion ?? definition.schemaVersion ?? '2008';
+      const useCm = schemaVersion === '2016' || Boolean(definition.bodyTablixes?.length);
       const fmtPos = (valIn: number) => (useCm ? fmtPosCm(valIn) : fmtPosIn(valIn));
       const fmtSz = (valIn: number, minIn = 0.014) =>
         useCm ? fmtSizeCm(valIn, minIn * CM_PER_INCH) : fmtSizeIn(valIn, minIn);
@@ -78,7 +78,7 @@ export class RdlcGenerator {
       const reportId = deterministicUuid(`rpt::${structureSeed}`);
 
       const dataSetsXml = this.buildDataSetsXml(definition);
-      const parametersXml = this.buildParametersXml(definition);
+      const parametersXml = schemaVersion === '2008' ? '' : this.buildParametersXml(definition);
       const embeddedImagesXml = this.buildEmbeddedImagesXml(definition);
       const printableWidth = Math.max(
         1.5,
@@ -91,13 +91,13 @@ export class RdlcGenerator {
 
       let reportItemsXml: string;
       let maxBodyHeight: number;
-      const bodyTablixes = schemaVersion === '2016' ? definition.bodyTablixes : undefined;
+      const bodyTablixes = definition.bodyTablixes;
       const bodySections = schemaVersion === '2016' ? definition.bodySections : undefined;
       const visualPages = definition.visualPages;
 
       if (bodyTablixes && bodyTablixes.length > 0) {
         reportItemsXml = bodyTablixes
-          .map((t) => this.buildTablixXml(t, definition, fmtPos, fmtSz, false))
+          .map((t) => this.buildTablixXml(t, definition, fmtPos, fmtSz, false, schemaVersion))
           .join('\n');
         maxBodyHeight = Math.max(
           1.0,
@@ -186,14 +186,12 @@ ${innerXml}
         }
       }
 
-      const pageHeaderXml =
-        schemaVersion === '2016' && definition.pageHeaderSpec
-          ? this.buildChromeBandXml('PageHeader', definition.pageHeaderSpec, definition, fmtPos, fmtSz)
-          : '';
-      const pageFooterXml =
-        schemaVersion === '2016' && definition.pageFooterSpec
-          ? this.buildChromeBandXml('PageFooter', definition.pageFooterSpec, definition, fmtPos, fmtSz)
-          : '';
+      const pageHeaderXml = definition.pageHeaderSpec
+        ? this.buildChromeBandXml('PageHeader', definition.pageHeaderSpec, definition, fmtPos, fmtSz, schemaVersion)
+        : '';
+      const pageFooterXml = definition.pageFooterSpec
+        ? this.buildChromeBandXml('PageFooter', definition.pageFooterSpec, definition, fmtPos, fmtSz, schemaVersion)
+        : '';
 
       const maxBodyWidth = printableWidth;
       const namespaceUrl =
@@ -212,7 +210,7 @@ ${reportItemsXml}
   </Body>
   <Width>${fmtSz(maxBodyWidth, 1.0)}</Width>
   <Page>
-    <PageHeight>${fmtSz(definition.pageHeightIn, 1.0)}</PageHeight>
+${pageHeaderXml}${pageFooterXml}    <PageHeight>${fmtSz(definition.pageHeightIn, 1.0)}</PageHeight>
     <PageWidth>${fmtSz(definition.pageWidthIn, 1.0)}</PageWidth>
     <LeftMargin>${fmtPos(definition.marginsIn.left)}</LeftMargin>
     <RightMargin>${fmtPos(definition.marginsIn.right)}</RightMargin>
@@ -242,6 +240,11 @@ ${pageHeaderXml}${pageFooterXml}        <PageHeight>${fmtSz(definition.pageHeigh
     </ReportSection>
   </ReportSections>`;
 
+      const reportParametersXml =
+        schemaVersion === '2008'
+          ? ''
+          : `\n  <ReportParameters>\n${parametersXml}\n  </ReportParameters>`;
+
       const xml = `<?xml version="1.0" encoding="utf-8"?>
 <Report xmlns="${namespaceUrl}" xmlns:rd="http://schemas.microsoft.com/SQLServer/reporting/reportdesigner">
   <AutoRefresh>0</AutoRefresh>
@@ -258,10 +261,7 @@ ${pageHeaderXml}${pageFooterXml}        <PageHeight>${fmtSz(definition.pageHeigh
 ${dataSetsXml}
   </DataSets>
 ${embeddedImagesXml}
-${bodyAndPageXml}
-  <ReportParameters>
-${parametersXml}
-  </ReportParameters>
+${bodyAndPageXml}${reportParametersXml}
   <Code>${escapeXml(embeddedVbCode)}</Code>
   <rd:ReportUnitType>${useCm ? 'Cm' : 'Inch'}</rd:ReportUnitType>
   <rd:ReportID>${reportId}</rd:ReportID>
@@ -341,34 +341,36 @@ ${fieldsXml}
     spec: RdlcBandContainerSpec,
     definition: ReportDefinition,
     fmtPos: (val: number) => string,
-    fmtSz: (val: number, min?: number) => string
+    fmtSz: (val: number, min?: number) => string,
+    schemaVersion: '2008' | '2016' = '2008'
   ): string {
+    const indent = schemaVersion === '2008' ? '    ' : '        ';
     const chunks: string[] = [];
     for (const r of spec.rectangles) {
-      chunks.push(this.buildVisualRectTreeXml(r, definition, fmtPos, fmtSz, '            '));
+      chunks.push(this.buildVisualRectTreeXml(r, definition, fmtPos, fmtSz, `${indent}    `));
     }
     for (const img of spec.images) {
       chunks.push(this.buildVisualImageXml(img, fmtPos, fmtSz));
     }
     for (const t of spec.tablixes) {
-      chunks.push(this.buildTablixXml(t, definition, fmtPos, fmtSz));
+      chunks.push(this.buildTablixXml(t, definition, fmtPos, fmtSz, false, schemaVersion));
     }
     for (const tb of spec.textboxes) {
-      chunks.push(this.buildVisualTextboxXml(tb, fmtPos, fmtSz));
+      chunks.push(this.buildVisualTextboxXml(tb, fmtPos, fmtSz, schemaVersion));
     }
 
     const itemsXml = chunks.join('\n');
-    return `        <${tagName}>
-          <Height>${fmtSz(spec.heightIn, 0.12)}</Height>
-          <PrintOnFirstPage>${spec.printOnFirstPage !== false ? 'true' : 'false'}</PrintOnFirstPage>
-          <PrintOnLastPage>${spec.printOnLastPage !== false ? 'true' : 'false'}</PrintOnLastPage>
-          <ReportItems>
+    return `${indent}<${tagName}>
+${indent}  <Height>${fmtSz(spec.heightIn, 0.12)}</Height>
+${indent}  <PrintOnFirstPage>${spec.printOnFirstPage !== false ? 'true' : 'false'}</PrintOnFirstPage>
+${indent}  <PrintOnLastPage>${spec.printOnLastPage !== false ? 'true' : 'false'}</PrintOnLastPage>
+${indent}  <ReportItems>
 ${itemsXml}
-          </ReportItems>
-          <Style>
-            <Border><Style>None</Style></Border>
-          </Style>
-        </${tagName}>\n`;
+${indent}  </ReportItems>
+${indent}  <Style>
+${indent}    <Border><Style>None</Style></Border>
+${indent}  </Style>
+${indent}</${tagName}>\n`;
   }
 
   private buildVisualPageContainerXml(
@@ -523,7 +525,8 @@ ${indent}</Rectangle>`;
     runs: VisualTextRun[] | undefined,
     fallbackValue: string,
     fallbackStyle: RegionStyle,
-    indent = '                    '
+    indent = '                    ',
+    schemaVersion: '2008' | '2016' = '2008'
   ): string {
     const effectiveRuns: VisualTextRun[] =
       runs && runs.length > 0
@@ -542,9 +545,10 @@ ${indent}</Rectangle>`;
 
     return effectiveRuns
       .map((run) => {
-        const val = run.parameterName
-          ? `=Parameters!${escapeXml(run.parameterName)}.Value`
-          : escapeXml(run.text);
+        const val =
+          schemaVersion !== '2008' && run.parameterName
+            ? `=Parameters!${escapeXml(run.parameterName)}.Value`
+            : escapeXml(run.text);
         const underlineTag = run.underline
           ? `\n${indent}    <TextDecoration>Underline</TextDecoration>`
           : '';
@@ -562,7 +566,7 @@ ${indent}</TextRun>`;
       .join('\n');
   }
 
-  private buildParagraphsXml(tb: VisualTextboxItem): string {
+  private buildParagraphsXml(tb: VisualTextboxItem, schemaVersion: '2008' | '2016' = '2008'): string {
     const st = tb.style;
     const paras: VisualParagraphSpec[] =
       tb.paragraphLines && tb.paragraphLines.length > 0
@@ -581,7 +585,8 @@ ${indent}</TextRun>`;
           pLine.runs.length > 0 ? pLine.runs : idx === 0 ? tb.runs : undefined,
           idx === 0 ? tb.text : '',
           st,
-          '                    '
+          '                    ',
+          schemaVersion
         );
         const lh = pLine.lineHeightPt ?? st.lineHeightPt;
         const lhXml = lh && lh > 0 ? `\n                    <LineHeight>${lh}pt</LineHeight>` : '';
@@ -597,30 +602,58 @@ ${runsXml}
       .join('\n');
   }
 
+  private buildBorderXml(st: Partial<RegionStyle>, indent: string): string {
+    const edges = st.borderEdges;
+    const color = escapeXml(st.borderColor ?? '#D0D7DE');
+    const widthPt = `${Math.max(0.5, st.borderWidthPt ?? 0.5)}pt`;
+
+    if (edges) {
+      const renderSide = (tag: string, mode: 'Solid' | 'None' | undefined): string => {
+        if (!mode || mode === 'None') {
+          return `${indent}<${tag}>\n${indent}  <Style>None</Style>\n${indent}</${tag}>`;
+        }
+        return `${indent}<${tag}>\n${indent}  <Color>${color}</Color>\n${indent}  <Style>Solid</Style>\n${indent}  <Width>${widthPt}</Width>\n${indent}</${tag}>`;
+      };
+      return [
+        `<Border>\n${indent}  <Style>None</Style>\n${indent}</Border>`,
+        renderSide('TopBorder', edges.top),
+        renderSide('BottomBorder', edges.bottom),
+        renderSide('LeftBorder', edges.left),
+        renderSide('RightBorder', edges.right),
+      ].join(`\n${indent}`);
+    }
+
+    if (st.borderColor) {
+      return `<Border>
+${indent}  <Color>${color}</Color>
+${indent}  <Style>Solid</Style>
+${indent}  <Width>${widthPt}</Width>
+${indent}</Border>`;
+    }
+
+    return `<Border>
+${indent}  <Style>None</Style>
+${indent}</Border>`;
+  }
+
   private buildVisualTextboxXml(
     tb: VisualTextboxItem,
     fmtPos: (val: number) => string,
-    fmtSz: (val: number, min?: number) => string
+    fmtSz: (val: number, min?: number) => string,
+    schemaVersion: '2008' | '2016' = '2008'
   ): string {
     const st = tb.style;
-    const borderXml = st.borderColor
-      ? `<Border>
-                <Color>${escapeXml(st.borderColor)}</Color>
-                <Style>Solid</Style>
-                <Width>${Math.max(0.5, st.borderWidthPt ?? 0.75)}pt</Width>
-              </Border>`
-      : `<Border>
-                <Style>None</Style>
-              </Border>`;
+    const borderXml = this.buildBorderXml(st, '                ');
     const bgXml = st.backgroundColor
       ? `\n              <BackgroundColor>${escapeXml(st.backgroundColor)}</BackgroundColor>`
       : '';
     const zIndexXml = tb.zIndex !== undefined ? `\n              <ZIndex>${tb.zIndex}</ZIndex>` : '';
-    const paragraphsXml = this.buildParagraphsXml(tb);
+    const paragraphsXml = this.buildParagraphsXml(tb, schemaVersion);
     const canGrowVal = tb.canGrow === undefined ? 'true' : tb.canGrow ? 'true' : 'false';
 
     return `            <Textbox Name="${escapeXml(tb.name)}">
               <CanGrow>${canGrowVal}</CanGrow>
+              <CanShrink>false</CanShrink>
               <KeepTogether>true</KeepTogether>
               <Paragraphs>
 ${paragraphsXml}
@@ -645,7 +678,8 @@ ${paragraphsXml}
     definition: ReportDefinition,
     fmtPos: (val: number) => string = fmtPosIn,
     fmtSz: (val: number, min?: number) => string = fmtIn,
-    nested = false
+    nested = false,
+    schemaVersion: '2008' | '2016' = '2008'
   ): string {
     const columnsXml = tablix.columnWidthsIn
       .map(
@@ -662,7 +696,7 @@ ${paragraphsXml}
     const rowsXml = tablix.rows
       .map((row) => {
         const cellsXml = row.cells
-          .map((cell) => this.buildCellXml(cell, definition, fmtPos, fmtSz))
+          .map((cell) => this.buildCellXml(cell, definition, fmtPos, fmtSz, schemaVersion))
           .join('\n');
         return `              <TablixRow>
                 <Height>${fmtSz(row.heightIn, 0.05)}</Height>
@@ -683,6 +717,11 @@ ${cellsXml}
           return `              <TablixMember>${memberPb}
                 <Group Name="Details_${escapeXml(tablix.name)}_${idx}" />
               </TablixMember>`;
+        }
+        if (schemaVersion === '2008' && !tablix.isRepeatingDetail) {
+          return memberPb
+            ? `              <TablixMember>${memberPb}\n              </TablixMember>`
+            : `              <TablixMember />`;
         }
         return `              <TablixMember>${memberPb}
                 <KeepWithGroup>After</KeepWithGroup>
@@ -735,17 +774,19 @@ ${rowMembersXml}
     cell: TablixCell,
     definition: ReportDefinition,
     fmtPos: (val: number) => string = fmtPosIn,
-    fmtSz: (val: number, min?: number) => string = fmtIn
+    fmtSz: (val: number, min?: number) => string = fmtIn,
+    schemaVersion: '2008' | '2016' = '2008'
   ): string {
     if (cell.skipBecauseMerged) {
       return `                  <TablixCell />`;
     }
 
     const colSpanTag = cell.colSpan > 1 ? `\n                        <ColSpan>${cell.colSpan}</ColSpan>` : '';
-    const rowSpanTag = cell.rowSpan > 1 ? `\n                        <RowSpan>${cell.rowSpan}</RowSpan>` : '';
+    const rowSpanTag =
+      schemaVersion !== '2008' && cell.rowSpan > 1 ? `\n                        <RowSpan>${cell.rowSpan}</RowSpan>` : '';
 
     if (cell.content.kind === 'Tablix') {
-      const nestedXml = this.buildTablixXml(cell.content.tablix, definition, fmtPos, fmtSz, true);
+      const nestedXml = this.buildTablixXml(cell.content.tablix, definition, fmtPos, fmtSz, true, schemaVersion);
       return `                  <TablixCell>
                     <CellContents>
 ${nestedXml}${colSpanTag}${rowSpanTag}
@@ -763,10 +804,10 @@ ${nestedXml}${colSpanTag}${rowSpanTag}
         childChunks.push(this.buildVisualImageXml(img, fmtPos, fmtSz));
       }
       for (const t of rc.tablixes) {
-        childChunks.push(this.buildTablixXml(t, definition, fmtPos, fmtSz, false));
+        childChunks.push(this.buildTablixXml(t, definition, fmtPos, fmtSz, false, schemaVersion));
       }
       for (const tb of rc.textboxes) {
-        childChunks.push(this.buildVisualTextboxXml(tb, fmtPos, fmtSz));
+        childChunks.push(this.buildVisualTextboxXml(tb, fmtPos, fmtSz, schemaVersion));
       }
       return `                  <TablixCell>
                     <CellContents>
@@ -806,10 +847,16 @@ ${childChunks.join('\n')}
     }
 
     if (cell.content.kind === 'Empty') {
+      const est = cell.content.style ?? {};
+      const borderXml = this.buildBorderXml(est, '                          ');
+      const bgXml = est.backgroundColor
+        ? `\n                          <BackgroundColor>${escapeXml(est.backgroundColor)}</BackgroundColor>`
+        : '';
       return `                  <TablixCell>
                     <CellContents>
                       <Textbox Name="${escapeXml(cell.content.name)}">
                         <CanGrow>true</CanGrow>
+                        <CanShrink>false</CanShrink>
                         <KeepTogether>true</KeepTogether>
                         <Paragraphs>
                           <Paragraph>
@@ -823,9 +870,7 @@ ${childChunks.join('\n')}
                           </Paragraph>
                         </Paragraphs>
                         <Style>
-                          <Border>
-                            <Style>None</Style>
-                          </Border>
+                          ${borderXml}${bgXml}
                         </Style>
                       </Textbox>${colSpanTag}${rowSpanTag}
                     </CellContents>
@@ -834,15 +879,7 @@ ${childChunks.join('\n')}
 
     const tb = cell.content;
     const st = tb.style;
-    const borderXml = st.borderColor
-      ? `<Border>
-                            <Color>${escapeXml(st.borderColor)}</Color>
-                            <Style>Solid</Style>
-                            <Width>${Math.max(0.5, st.borderWidthPt ?? 0.75)}pt</Width>
-                          </Border>`
-      : `<Border>
-                            <Style>None</Style>
-                          </Border>`;
+    const borderXml = this.buildBorderXml(st, '                          ');
     const bgXml = st.backgroundColor
       ? `\n                          <BackgroundColor>${escapeXml(st.backgroundColor)}</BackgroundColor>`
       : '';
@@ -860,12 +897,13 @@ ${childChunks.join('\n')}
       style: st,
       canGrow: tb.canGrow,
     };
-    const paragraphsXml = this.buildParagraphsXml(syntheticTb);
+    const paragraphsXml = this.buildParagraphsXml(syntheticTb, schemaVersion);
 
     return `                  <TablixCell>
                     <CellContents>
                       <Textbox Name="${escapeXml(tb.name)}">
                         <CanGrow>${tb.canGrow ? 'true' : 'false'}</CanGrow>
+                        <CanShrink>false</CanShrink>
                         <KeepTogether>true</KeepTogether>
                         <Paragraphs>
 ${paragraphsXml}

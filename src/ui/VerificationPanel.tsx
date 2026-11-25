@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Play } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Play, ChevronLeft, ChevronRight } from 'lucide-react';
 import { FrontendPipelineResult } from './types.ts';
 
 interface VerificationPanelProps {
@@ -13,6 +13,43 @@ export function VerificationPanel({ result, onVisualDiffUpdated }: VerificationP
   const [comparing, setComparing] = useState(false);
   const [compareError, setCompareError] = useState<string | null>(null);
   const [visualDiff, setVisualDiff] = useState(result.visualDiff);
+
+  const pageCount = Math.max(1, result.layoutModel.document.pageCount);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [htmlPreview, setHtmlPreview] = useState<string | null>(null);
+  const [loadingHtml, setLoadingHtml] = useState(false);
+
+  useEffect(() => {
+    setCurrentPage(1);
+    setHtmlPreview(null);
+  }, [result]);
+
+  useEffect(() => {
+    let active = true;
+    setLoadingHtml(true);
+    fetch('/api/pipeline/preview-render', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rdlcXml: result.rdlcXml,
+        title: result.reportDefinition.reportName,
+        sampleFields: result.dummyJson,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (active && data.html) {
+          setHtmlPreview(data.html);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (active) setLoadingHtml(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [result]);
 
   const handleRunCompare = async () => {
     if (!origPdf || !genPdf) {
@@ -37,8 +74,91 @@ export function VerificationPanel({ result, onVisualDiffUpdated }: VerificationP
     }
   };
 
+  const pageRaster =
+    visualDiff?.pages[currentPage - 1]?.originalImageBase64 ??
+    result.visualDiff?.pages[currentPage - 1]?.originalImageBase64 ??
+    result.layoutModel.pages[currentPage - 1]?.rasterPreviewBase64;
+
   return (
     <div className="space-y-6">
+      {/* Side-by-Side Split Viewer */}
+      <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">
+              Side-by-Side Alignment Viewer
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Compare original source PDF page side-by-side with generated RDLC HTML preview.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              disabled={currentPage <= 1}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium border border-slate-300 bg-white text-slate-800 rounded-md hover:bg-slate-50 disabled:opacity-40"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+              Prev
+            </button>
+            <span className="text-xs font-mono tabular-nums text-slate-700 px-2">
+              Page {currentPage} of {pageCount}
+            </span>
+            <button
+              onClick={() => setCurrentPage((p) => Math.min(pageCount, p + 1))}
+              disabled={currentPage >= pageCount}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium border border-slate-300 bg-white text-slate-800 rounded-md hover:bg-slate-50 disabled:opacity-40"
+            >
+              Next
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-stretch">
+          {/* Left Pane: Original PDF Page */}
+          <div className="border border-slate-200 rounded-md bg-slate-50 flex flex-col">
+            <div className="px-3 py-2 bg-white border-b border-slate-200 text-xs font-semibold text-slate-900">
+              Original PDF Page {currentPage}
+            </div>
+            <div className="p-3 overflow-auto max-h-[600px] flex-1 flex justify-center items-start">
+              {pageRaster ? (
+                <img
+                  src={`data:image/png;base64,${pageRaster}`}
+                  alt={`Original Page ${currentPage}`}
+                  className="max-w-full bg-white border border-slate-300 shadow-xs"
+                />
+              ) : (
+                <div className="py-24 text-xs text-slate-500">
+                  Original raster unavailable for page {currentPage}.
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right Pane: RDLC HTML Preview */}
+          <div className="border border-slate-200 rounded-md bg-slate-50 flex flex-col">
+            <div className="px-3 py-2 bg-white border-b border-slate-200 text-xs font-semibold text-slate-900">
+              Generated RDLC HTML Preview
+            </div>
+            <div className="p-3 overflow-auto max-h-[600px] flex-1 flex justify-center items-start">
+              {htmlPreview ? (
+                <iframe
+                  title="RDLC HTML Preview"
+                  srcDoc={htmlPreview}
+                  sandbox=""
+                  className="w-full h-[560px] border border-slate-300 bg-slate-900 rounded"
+                />
+              ) : (
+                <div className="py-24 text-xs font-mono text-slate-600">
+                  {loadingHtml ? 'Loading HTML preview...' : 'HTML preview unavailable.'}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Logic Testing Results */}
       <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">

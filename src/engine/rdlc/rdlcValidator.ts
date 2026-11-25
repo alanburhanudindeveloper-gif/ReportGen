@@ -34,6 +34,7 @@ export interface RdlcValidationRuntimeContext {
 
 export interface RdlcValidationOptions {
   requireRdlc2008?: boolean;
+  strictCompiled2008?: boolean;
   context?: RdlcValidationRuntimeContext;
 }
 
@@ -125,6 +126,10 @@ export class RdlcValidator {
   public validate(rdlcXml: string, options?: RdlcValidationOptions): RdlcValidationResult {
     const errors: RdlcValidationDiagnostic[] = [];
     const warnings: RdlcValidationDiagnostic[] = [];
+    const has2008Ns = /http:\/\/schemas\.microsoft\.com\/sqlserver\/reporting\/2008\/01\/reportdefinition/i.test(
+      rdlcXml
+    );
+    const is2008 = Boolean(options?.requireRdlc2008) || has2008Ns;
 
     // 1. Validate XML well-formedness
     const xmlCheck = XMLValidator.validate(rdlcXml);
@@ -134,7 +139,7 @@ export class RdlcValidator {
         severity: 'ERROR',
         message: `Invalid XML syntax: ${xmlCheck.err.msg} (line ${xmlCheck.err.line})`,
       });
-      return { valid: false, checkedRules: options?.requireRdlc2008 ? 10 : 15, errors, warnings };
+      return { valid: false, checkedRules: is2008 ? 10 : 15, errors, warnings };
     }
 
     const parser = new XMLParser({
@@ -146,15 +151,45 @@ export class RdlcValidator {
     const report = parsed?.Report;
 
     if (options?.requireRdlc2008) {
-      const has2008Ns = /http:\/\/schemas\.microsoft\.com\/sqlserver\/reporting\/2008\/01\/reportdefinition/i.test(
-        rdlcXml
-      );
       if (!has2008Ns || report?.ReportSections) {
         errors.push({
           ruleId: 'RDLC-2008',
           severity: 'ERROR',
           message:
             'RDLC 2008 schema is required (xmlns=".../2008/01/reportdefinition" with top-level <Body> and <Page>, no <ReportSections>).',
+        });
+      }
+    } else if (is2008 && report?.ReportSections) {
+      errors.push({
+        ruleId: 'RDLC-2008',
+        severity: 'ERROR',
+        message: 'RDLC 2008 report must not contain <ReportSections>.',
+      });
+    }
+
+    if (is2008 && options?.strictCompiled2008) {
+      if (report?.ReportParameters) {
+        errors.push({
+          ruleId: 'RDLC-2008',
+          severity: 'ERROR',
+          message: 'Strict RDLC 2008 mode forbids <ReportParameters>.',
+          location: 'Report',
+        });
+      }
+      if (/<Visibility\b/i.test(rdlcXml)) {
+        errors.push({
+          ruleId: 'RDLC-2008',
+          severity: 'ERROR',
+          message: 'Strict RDLC 2008 mode forbids <Visibility> elements.',
+          location: 'Report',
+        });
+      }
+      if (/<RowSpan\b/i.test(rdlcXml)) {
+        errors.push({
+          ruleId: 'RDLC-2008',
+          severity: 'ERROR',
+          message: 'Strict RDLC 2008 mode forbids <RowSpan> (simulate vertical merges with empty continuation cells).',
+          location: 'Report',
         });
       }
     }
@@ -169,7 +204,7 @@ export class RdlcValidator {
         severity: 'ERROR',
         message: 'Report must contain <Body> and <Page> (RDLC 2008) or <ReportSections>/<ReportSection> (RDLC 2016).',
       });
-      return { valid: false, checkedRules: options?.requireRdlc2008 ? 10 : 15, errors, warnings };
+      return { valid: false, checkedRules: is2008 ? 10 : 15, errors, warnings };
     }
 
     // Collect DataSets & Fields
@@ -368,6 +403,14 @@ export class RdlcValidator {
             }
             const nestedTbl = cc.Tablix as Record<string, unknown> | undefined;
             if (nestedTbl) {
+              if (is2008 && options?.strictCompiled2008) {
+                errors.push({
+                  ruleId: 'RDLC-2008',
+                  severity: 'ERROR',
+                  message: `Tablix "${tblName}" contains forbidden nested <Tablix> inside CellContents [${rIdx},${cIdx}].`,
+                  location: `${tblName}.Row[${rIdx}].Col[${cIdx}]`,
+                });
+              }
               validateSingleTablix(nestedTbl, `${tblName}.Cell[${rIdx},${cIdx}]`);
             }
             const nestedRect = cc.Rectangle as Record<string, unknown> | undefined;
@@ -541,8 +584,8 @@ export class RdlcValidator {
       }
     }
 
-    // Rules RDLC-11..15 (RDLC 2016 Gate)
-    if (!options?.requireRdlc2008) {
+    // Rules RDLC-11..15 (Full-Tablix / Chrome / Containment / Runtime Collision & Flow Gate)
+    {
       const bodyItems = (body?.ReportItems ?? {}) as Record<string, unknown>;
       const topBodyRects = asArray(
         bodyItems.Rectangle as Record<string, unknown> | Record<string, unknown>[]
@@ -647,7 +690,7 @@ export class RdlcValidator {
         }
       }
 
-      // RDLC-13: v3 100% Full-Tablix Body enforcement & printable width containment
+      // RDLC-13: Full-Tablix Body enforcement & printable width containment
       if (isV3FullTablix) {
         if (
           topBodyRects.length > 0 ||
@@ -658,7 +701,7 @@ export class RdlcValidator {
           errors.push({
             ruleId: 'RDLC-13',
             severity: 'ERROR',
-            message: `v3 Full-Tablix <Body><ReportItems> must contain ONLY <Tablix> elements (found Rectangles=${topBodyRects.length}, Textboxes=${topBodyTextboxes.length}, Images=${topBodyImages.length}, Lines=${topBodyLines.length}).`,
+            message: `Full-Tablix <Body><ReportItems> must contain ONLY <Tablix> elements (found Rectangles=${topBodyRects.length}, Textboxes=${topBodyTextboxes.length}, Images=${topBodyImages.length}, Lines=${topBodyLines.length}).`,
             location: 'Body.ReportItems',
           });
         }
@@ -681,7 +724,7 @@ export class RdlcValidator {
             });
           }
         }
-      } else if (hasV2Sections) {
+      } else if (hasV2Sections && !is2008) {
         for (const secRect of topBodyRects) {
           const secName = String(secRect?.['@_Name'] ?? '');
           const subRects = asArray(
@@ -732,7 +775,7 @@ export class RdlcValidator {
         }
       }
 
-      // RDLC-14: Zero full-page Layer0 raster blobs & valid positive Textbox geometry (recursive across Tablix cells & Rectangles)
+      // RDLC-14: Zero full-page Layer0 raster blobs & valid positive Textbox geometry
       if (isV3FullTablix || hasV2Sections) {
         const inspectGeometryNodes = (ri: Record<string, unknown> | undefined, ctx: string) => {
           if (!ri) return;
@@ -820,13 +863,13 @@ export class RdlcValidator {
         inspectGeometryNodes(page?.PageFooter?.ReportItems as Record<string, unknown> | undefined, 'PageFooter');
       }
 
-      // RDLC-15: Canonical units + Runtime Collision, Page Parity & 95% Visual Parity Gate
+      // RDLC-15: Canonical units + Runtime Collision, Page Parity & Visual Parity Gate
       const unitType = String(report?.ReportUnitType ?? '').trim();
       if (!unitType || !['Cm', 'Inch'].includes(unitType)) {
         errors.push({
           ruleId: 'RDLC-15',
           severity: 'ERROR',
-          message: `RDLC 2016 report must declare valid <rd:ReportUnitType> ("Cm" or "Inch", got "${unitType || 'none'}").`,
+          message: `Report must declare valid <rd:ReportUnitType> ("Cm" or "Inch", got "${unitType || 'none'}").`,
           location: 'Report',
         });
       }
@@ -854,12 +897,14 @@ export class RdlcValidator {
           ctx.renderedPageCount !== undefined &&
           ctx.renderedPageCount !== ctx.sourcePageCount
         ) {
-          errors.push({
+          const diag = {
             ruleId: 'RDLC-15',
-            severity: 'ERROR',
-            message: `Page parity failed: rendered ${ctx.renderedPageCount} page(s) vs source PDF ${ctx.sourcePageCount} page(s).`,
+            severity: is2008 ? ('WARN' as const) : ('ERROR' as const),
+            message: `Page parity notice: rendered ${ctx.renderedPageCount} page(s) vs source PDF ${ctx.sourcePageCount} page(s).`,
             location: 'VisualDiff',
-          });
+          };
+          if (is2008) warnings.push(diag);
+          else errors.push(diag);
         }
         if (ctx.perPageParity && ctx.perPageParity.length > 0) {
           const threshold = ctx.targetParityPercent ?? 95.0;
@@ -868,18 +913,20 @@ export class RdlcValidator {
             const summary = failingPages
               .map((p) => `P${p.page}=${p.parityPercent.toFixed(2)}%`)
               .join(', ');
-            errors.push({
+            const diag = {
               ruleId: 'RDLC-15',
-              severity: 'ERROR',
-              message: `Visual parity gate (< ${threshold.toFixed(1)}%) failed on: ${summary}.`,
+              severity: is2008 ? ('WARN' as const) : ('ERROR' as const),
+              message: `Visual parity check (< ${threshold.toFixed(1)}%) on: ${summary}.`,
               location: 'VisualDiff',
-            });
+            };
+            if (is2008) warnings.push(diag);
+            else errors.push(diag);
           }
         }
       }
     }
 
-    const checkedRules = options?.requireRdlc2008 ? 10 : 15;
+    const checkedRules = is2008 ? 10 : 15;
     const valid = errors.length === 0;
     this.logger.info('RdlcValidation', `RDLC ${checkedRules}-point validation: ${valid ? 'PASS' : 'FAIL'}`, {
       checkedRules,

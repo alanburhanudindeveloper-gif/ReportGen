@@ -122,6 +122,12 @@ export interface RegionStyle {
   backgroundColor?: string;
   borderColor?: string;
   borderWidthPt?: number;
+  borderEdges?: {
+    top?: 'Solid' | 'None';
+    bottom?: 'Solid' | 'None';
+    left?: 'Solid' | 'None';
+    right?: 'Solid' | 'None';
+  };
   textAlign: 'Left' | 'Center' | 'Right';
   verticalAlign: 'Top' | 'Middle' | 'Bottom';
   lineHeightPt?: number;
@@ -197,6 +203,43 @@ export interface ReconstructedBand {
   sourceRegionIds: string[];
 }
 
+export interface VectorHLine {
+  x1: number;
+  y: number;
+  x2: number;
+  strokeColor?: string;
+  lineWidthPt: number;
+}
+
+export interface VectorVLine {
+  x: number;
+  y1: number;
+  y2: number;
+  strokeColor?: string;
+  lineWidthPt: number;
+}
+
+export interface VectorFillBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fillHex: string;
+  strokeColor?: string;
+  lineWidthPt?: number;
+}
+
+export interface PageVectorPrimitives {
+  unit: 'pt';
+  pageWidthPt: number;
+  pageHeightPt: number;
+  hLines: VectorHLine[];
+  vLines: VectorVLine[];
+  fillBoxes: VectorFillBox[];
+  fillBanners?: VectorFillBox[];
+  fillBands?: VectorFillBox[];
+}
+
 export interface LayoutPage {
   pageNumber: number;
   width: number;
@@ -204,6 +247,7 @@ export interface LayoutPage {
   rawObjectCount: number;
   regions: LayoutRegion[];
   bands: ReconstructedBand[];
+  vectorPrimitives?: PageVectorPrimitives;
   rasterPreviewBase64?: string;
   layer0BackgroundBase64?: string;
   layer0ImageName?: string;
@@ -460,8 +504,11 @@ export interface RdlcDocumentHierarchy {
   sections: LayoutSectionSummary[];
 }
 
+export type RdlcSchemaVersion = '2008' | '2016';
+
 export interface ReportDefinition {
   reportName: string;
+  schemaVersion?: RdlcSchemaVersion;
   dataSourceName: string;
   dataSetName: string;
   pageWidthIn: number;
@@ -599,7 +646,7 @@ export interface PipelineRunResult {
   reportDefinition: ReportDefinition;
   rdlcXml: string;
   rdlcSha256: string;
-  rdlcSchemaVersion: '2016';
+  rdlcSchemaVersion: RdlcSchemaVersion;
   vbCode: string;
   dummyJson: Record<string, unknown>;
   rdlcValidation: RdlcValidationResult;

@@ -231,7 +231,6 @@ export function LayoutInspector({ result }: LayoutInspectorProps) {
                     <div className="flex flex-wrap items-center justify-between gap-2 font-mono">
                       <span className="font-semibold text-slate-900">{sec.name}</span>
                       <span className="text-slate-600 tabular-nums">
-                        {sec.archetype ? `Archetype ${sec.archetype} · ` : ''}
                         {sec.layoutType} · {toCm(sec.widthIn)}×{toCm(sec.heightIn)}cm
                       </span>
                     </div>

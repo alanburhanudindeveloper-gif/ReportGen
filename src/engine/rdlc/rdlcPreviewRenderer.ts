@@ -860,7 +860,13 @@ export class RdlcVisualPreviewRenderer {
       return `<img data-rdlc-name="${name}" alt="${escapeHtml(imgKey)}" src="${src}" style="${posCss}object-fit:${fit};display:block;" />`;
     };
 
-    const renderTablix = (tblNode: OrderedNode, pageNum: number, topOffsetPt = 0, nested = false): string => {
+    const renderTablix = (
+      tblNode: OrderedNode,
+      pageNum: number,
+      topOffsetPt = 0,
+      nested = false,
+      flowStyleCss?: string
+    ): string => {
       stats.tablixes++;
       const name = escapeHtml(attrOf(tblNode, 'Name'));
       const zIdx = this.zIndexOf(tblNode);
@@ -917,7 +923,7 @@ export class RdlcVisualPreviewRenderer {
               const rBgCss = rBg ? `background:${rBg};` : '';
               const inner = renderReportItems(childOf(subRect, 'ReportItems'), pageNum, 0);
               tds.push(
-                `<td${spanAttrs} style="padding:0;border:none;vertical-align:top;box-sizing:border-box;"><div data-rdlc-name="${rName}" style="position:relative;width:100%;height:${rH};${rBgCss}${borderCss(rst)}overflow:hidden;box-sizing:border-box;">${inner}</div></td>`
+                `<td${spanAttrs} style="padding:0;border:none;vertical-align:top;box-sizing:border-box;"><div data-rdlc-name="${rName}" style="position:relative;width:100%;min-height:${rH};${rBgCss}${borderCss(rst)}box-sizing:border-box;">${inner}</div></td>`
               );
               return;
             }
@@ -940,14 +946,17 @@ export class RdlcVisualPreviewRenderer {
               `<td${spanAttrs} style="${bgCss}${borderCss(st)}${padCss}vertical-align:${vAlign};box-sizing:border-box;">${inner}</td>`
             );
           });
-          return `<tr style="height:${rH};">${tds.join('')}</tr>`;
+          const rowHeightCss = flowStyleCss ? `min-height:${rH};` : `height:${rH};`;
+          return `<tr style="${rowHeightCss}">${tds.join('')}</tr>`;
         })
         .join('');
 
       const tablePosCss = nested
         ? 'position:relative;width:100%;height:100%;border-collapse:collapse;table-layout:fixed;'
-        : `position:absolute;z-index:${zIdx};top:${top};left:${left};width:${width};border-collapse:collapse;table-layout:fixed;`;
-      return `<table data-rdlc-name="${name}" style="${tablePosCss}">${colgroup}<tbody>${trs}</tbody></table>`;
+        : flowStyleCss
+          ? `${flowStyleCss}width:${width};border-collapse:collapse;table-layout:fixed;`
+          : `position:absolute;z-index:${zIdx};top:${top};left:${left};width:${width};border-collapse:collapse;table-layout:fixed;`;
+      return `<table data-rdlc-name="${name}" class="${flowStyleCss ? 'rdlc-flow-table' : ''}" style="${tablePosCss}">${colgroup}<tbody>${trs}</tbody></table>`;
     };
 
     const renderSingleItem = (item: OrderedNode, pageNum: number, topOffsetPt = 0): string => {
@@ -966,6 +975,160 @@ export class RdlcVisualPreviewRenderer {
       if (k === 'Image') return renderImage(item, false, topOffsetPt);
       if (k === 'Tablix') return renderTablix(item, pageNum, topOffsetPt, false);
       return '';
+    };
+
+    const renderFlowItem = (
+      item: OrderedNode,
+      pageNum: number,
+      topOffsetPt: number,
+      marginLeftPt: number,
+      marginTopPt: number
+    ): string => {
+      const k = tagName(item);
+      const marginCss = `${marginLeftPt > 0.5 ? `margin-left:${Math.round(marginLeftPt * 100) / 100}pt;` : ''}${marginTopPt > 0.5 ? `margin-top:${Math.round(marginTopPt * 100) / 100}pt;` : ''}`;
+      if (k === 'Tablix') {
+        return renderTablix(item, pageNum, topOffsetPt, false, marginCss || 'display:table;');
+      }
+      if (k === 'Textbox') {
+        stats.textboxes++;
+        const name = escapeHtml(attrOf(item, 'Name'));
+        const st = parseStyle(childOf(item, 'Style'));
+        const padCss = `padding:${safeDim(st.PaddingTop as string | undefined, '0pt')} ${safeDim(st.PaddingRight as string | undefined, '0pt')} ${safeDim(st.PaddingBottom as string | undefined, '0pt')} ${safeDim(st.PaddingLeft as string | undefined, '0pt')};`;
+        const bg = safeColor(st.BackgroundColor as string | undefined);
+        const bgCss = bg ? `background:${bg};` : '';
+        const width = safeDim(textOf(item, 'Width'), '100%');
+        const minH = safeDim(textOf(item, 'Height'), 'auto');
+        return `<div data-rdlc-name="${name}" style="${marginCss}width:${width};min-height:${minH};${bgCss}${borderCss(st)}${padCss}box-sizing:border-box;">${renderParagraphs(item, pageNum)}</div>`;
+      }
+      if (k === 'Image') {
+        stats.images++;
+        const name = escapeHtml(attrOf(item, 'Name'));
+        const imgKey = textOf(item, 'Value');
+        const sizing = textOf(item, 'Sizing') || 'FitProportional';
+        const fit = sizing === 'Fit' ? 'fill' : 'contain';
+        const src = ctx.embeddedImages.get(imgKey)?.dataUrl;
+        const width = safeDim(textOf(item, 'Width'), '1cm');
+        const height = safeDim(textOf(item, 'Height'), '1cm');
+        if (!src) {
+          return `<div data-rdlc-name="${name}" style="${marginCss}width:${width};height:${height};display:flex;align-items:center;justify-content:center;border:0.5pt dashed #94a3b8;font-size:7pt;color:#64748b;">[${escapeHtml(imgKey || 'Image')}]</div>`;
+        }
+        return `<img data-rdlc-name="${name}" alt="${escapeHtml(imgKey)}" src="${src}" style="${marginCss}width:${width};height:${height};object-fit:${fit};display:block;" />`;
+      }
+      if (k === 'Rectangle') {
+        stats.rectangles++;
+        const name = escapeHtml(attrOf(item, 'Name'));
+        const st = parseStyle(childOf(item, 'Style'));
+        const bg = safeColor(st.BackgroundColor as string | undefined);
+        const bgCss = bg ? `background:${bg};` : '';
+        const inner = renderReportItems(childOf(item, 'ReportItems'), pageNum, 0);
+        return `<div data-rdlc-name="${name}" style="position:relative;${marginCss}width:${safeDim(textOf(item, 'Width'), '100%')};min-height:${safeDim(textOf(item, 'Height'), '1cm')};${bgCss}${borderCss(st)}box-sizing:border-box;">${inner}</div>`;
+      }
+      return '';
+    };
+
+    const renderFlowBody = (
+      sliceItems: Array<{ node: OrderedNode; topOffsetPt: number }>,
+      pageNum: number
+    ): string => {
+      if (sliceItems.length === 0) return '';
+      const positioned = sliceItems
+        .map(({ node, topOffsetPt }) => {
+          const xPt = Math.max(0, dimToPt(textOf(node, 'Left'), 0));
+          const yPt = Math.max(0, dimToPt(textOf(node, 'Top'), 0) - topOffsetPt);
+          const wPt = Math.max(8, dimToPt(textOf(node, 'Width'), 100));
+          const hPt = Math.max(8, dimToPt(textOf(node, 'Height'), 16));
+          return { node, topOffsetPt, xPt, yPt, wPt, hPt };
+        })
+        .sort((a, b) => a.yPt - b.yPt || a.xPt - b.xPt);
+
+      // Partition page into monotonic Y flow bands; side-by-side Tablix_Left & Tablix_Right share a Y band
+      interface FlowBand {
+        y0: number;
+        y1: number;
+        items: typeof positioned;
+      }
+      const bands: FlowBand[] = [];
+      for (const it of positioned) {
+        const last = bands[bands.length - 1];
+        if (last && it.yPt < last.y1 - 2) {
+          last.items.push(it);
+          last.y1 = Math.max(last.y1, it.yPt + it.hPt);
+        } else {
+          bands.push({ y0: it.yPt, y1: it.yPt + it.hPt, items: [it] });
+        }
+      }
+
+      let cursorY = 0;
+      const chunks: string[] = [];
+
+      for (const band of bands) {
+        const gapAboveBandPt = Math.max(0, band.y0 - cursorY);
+
+        // Group items inside the band into horizontal tracks (CSS Grid columns when >= 2 tracks exist)
+        const xTracks: Array<{ x0: number; x1: number; items: typeof positioned }> = [];
+        for (const it of [...band.items].sort((a, b) => a.xPt - b.xPt || a.yPt - b.yPt)) {
+          const existing = xTracks.find(
+            (tr) => Math.min(tr.x1, it.xPt + it.wPt) - Math.max(tr.x0, it.xPt) > 4
+          );
+          if (existing) {
+            existing.items.push(it);
+            existing.x0 = Math.min(existing.x0, it.xPt);
+            existing.x1 = Math.max(existing.x1, it.xPt + it.wPt);
+          } else {
+            xTracks.push({ x0: it.xPt, x1: it.xPt + it.wPt, items: [it] });
+          }
+        }
+        xTracks.sort((a, b) => a.x0 - b.x0);
+
+        if (xTracks.length >= 2) {
+          const gridLeftPt = xTracks[0].x0;
+          const colDefs: string[] = [];
+          const colHtmls: string[] = [];
+
+          xTracks.forEach((tr, trIdx) => {
+            const trW = Math.max(24, Math.round((tr.x1 - tr.x0) * 100) / 100);
+            if (trIdx > 0) {
+              const prevEnd = xTracks[trIdx - 1].x1;
+              const spacerPt = Math.max(0, Math.round((tr.x0 - prevEnd) * 100) / 100);
+              if (spacerPt > 1) {
+                colDefs.push(`${spacerPt}pt`);
+                colHtmls.push('<div class="rdlc-flow-gutter"></div>');
+              }
+            }
+            colDefs.push(`${trW}pt`);
+
+            const sortedTrItems = [...tr.items].sort((a, b) => a.yPt - b.yPt);
+            let trCursorY = band.y0;
+            const trInner = sortedTrItems
+              .map((it) => {
+                const gapY = Math.max(0, it.yPt - trCursorY);
+                trCursorY = Math.max(trCursorY, it.yPt + it.hPt);
+                const relLeft = Math.max(0, it.xPt - tr.x0);
+                return renderFlowItem(it.node, pageNum, it.topOffsetPt, relLeft, gapY);
+              })
+              .join('');
+            colHtmls.push(`<div class="rdlc-flow-track" style="display:flex;flex-direction:column;">${trInner}</div>`);
+          });
+
+          const topCss = gapAboveBandPt > 0.5 ? `margin-top:${Math.round(gapAboveBandPt * 100) / 100}pt;` : '';
+          const leftCss = gridLeftPt > 0.5 ? `margin-left:${Math.round(gridLeftPt * 100) / 100}pt;` : '';
+          chunks.push(
+            `<div class="rdlc-flow-grid" style="display:grid;grid-template-columns:${colDefs.join(' ')};align-items:start;${topCss}${leftCss}">${colHtmls.join('')}</div>`
+          );
+        } else {
+          const sortedBand = [...band.items].sort((a, b) => a.yPt - b.yPt || a.xPt - b.xPt);
+          let innerY = band.y0;
+          sortedBand.forEach((it, idx) => {
+            const topGap = idx === 0 ? gapAboveBandPt : Math.max(0, it.yPt - innerY);
+            innerY = Math.max(innerY, it.yPt + it.hPt);
+            chunks.push(renderFlowItem(it.node, pageNum, it.topOffsetPt, it.xPt, topGap));
+          });
+        }
+
+        cursorY = Math.max(cursorY, band.y1);
+      }
+
+      return chunks.join('');
     };
 
     const renderReportItems = (riNode: OrderedNode | undefined, pageNum: number, topOffsetPt = 0): string => {
@@ -1070,26 +1233,20 @@ export class RdlcVisualPreviewRenderer {
           !(pNum === 1 && !ctx.footerPrintOnFirstPage) &&
           !(pNum === totalPages && !ctx.footerPrintOnLastPage);
 
-        const activeHeaderHStr = showHeader ? ctx.headerHStr : '0cm';
-        const activeFooterHStr = showFooter ? ctx.footerHStr : '0cm';
-
         const headerHtml = showHeader && ctx.headerItemsNode
-          ? `<div class="rdlc-page-header" style="position:relative;width:calc(${ctx.pageWStr} - ${ctx.leftMStr} - ${ctx.rightMStr});height:${ctx.headerHStr};overflow:hidden;">${renderReportItems(ctx.headerItemsNode, pNum)}</div>`
+          ? `<header class="rdlc-page-header" style="position:relative;width:100%;height:${ctx.headerHStr};overflow:visible;">${renderReportItems(ctx.headerItemsNode, pNum)}</header>`
           : '';
-        const bodyHtml = [...slice.items]
-          .sort((a, b) => this.zIndexOf(a.node) - this.zIndexOf(b.node))
-          .map(({ node, topOffsetPt }) => renderSingleItem(node, pNum, topOffsetPt))
-          .join('');
+        const bodyHtml = renderFlowBody(slice.items, pNum);
         const footerHtml = showFooter && ctx.footerItemsNode
-          ? `<div class="rdlc-page-footer" style="position:relative;width:${ctx.pageWStr};height:${ctx.footerHStr};margin-left:-${ctx.leftMStr};overflow:hidden;">${renderReportItems(ctx.footerItemsNode, pNum)}</div>`
+          ? `<footer class="rdlc-page-footer" style="position:relative;width:100%;height:${ctx.footerHStr};margin-top:auto;overflow:visible;">${renderReportItems(ctx.footerItemsNode, pNum)}</footer>`
           : '';
 
         return `<section class="rdlc-page" data-page="${pNum}">
-  <div class="rdlc-page-inner" style="padding:${ctx.topMStr} ${ctx.rightMStr} 0 ${ctx.leftMStr};width:100%;height:calc(${ctx.pageHStr} - ${activeFooterHStr});position:relative;overflow:hidden;">
+  <div class="rdlc-page-inner" style="padding:${ctx.topMStr} ${ctx.rightMStr} ${ctx.bottomMStr} ${ctx.leftMStr};width:100%;min-height:${ctx.pageHStr};display:flex;flex-direction:column;">
     ${headerHtml}
-    <div class="rdlc-page-body" style="position:relative;width:100%;height:calc(100% - ${activeHeaderHStr});overflow:hidden;">${bodyHtml}</div>
+    <main class="rdlc-page-body" style="width:100%;flex:1 1 auto;">${bodyHtml}</main>
+    ${footerHtml}
   </div>
-  ${footerHtml}
 </section>`;
       })
       .join('\n');
@@ -1123,12 +1280,14 @@ export class RdlcVisualPreviewRenderer {
     }
     .rdlc-page {
       width: ${ctx.pageWStr};
-      height: ${ctx.pageHStr};
+      min-height: ${ctx.pageHStr};
       background: #ffffff;
       box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
       position: relative;
-      overflow: hidden;
       flex-shrink: 0;
+    }
+    .rdlc-flow-table td {
+      word-break: break-word;
     }
     .rdlc-p {
       margin: 0;
@@ -1147,7 +1306,7 @@ export class RdlcVisualPreviewRenderer {
 </body>
 </html>`;
 
-    this.logger.info('RdlcPreviewRenderer', 'Rendered coordinate-locked RDLC HTML preview', {
+    this.logger.info('RdlcPreviewRenderer', 'Rendered flow-based semantic HTML table preview', {
       pageCount: totalPages,
       tablixes: stats.tablixes,
       embeddedImages: stats.embeddedImages,
@@ -1706,8 +1865,8 @@ export class RdlcVisualPreviewRenderer {
 
       if (showFooter && ctx.footerItemsNode) {
         const footerNodes = childrenOf(ctx.footerItemsNode).map((n) => ({ node: n, topOffsetPt: 0 }));
-        const footerOriginTop = ctx.pageHPt - ctx.footerHPt;
-        drawNodeList(pdfPage, footerNodes, 0, footerOriginTop, slice.pageNum);
+        const footerOriginTop = ctx.pageHPt - ctx.bottomMPt - ctx.footerHPt;
+        drawNodeList(pdfPage, footerNodes, ctx.leftMPt, footerOriginTop, slice.pageNum);
       }
     }
 

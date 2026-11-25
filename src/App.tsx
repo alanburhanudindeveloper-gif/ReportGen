@@ -48,6 +48,7 @@ export default function App() {
   const [rdlcFile, setRdlcFile] = useState<File | null>(null);
   const [vbFile, setVbFile] = useState<File | null>(null);
   const [excelFile, setExcelFile] = useState<File | null>(null);
+  const [schemaVersion, setSchemaVersion] = useState<'2008' | '2016'>('2008');
 
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -149,6 +150,7 @@ export default function App() {
     try {
       const form = new FormData();
       form.append('useFixture', String(useFixture));
+      form.append('schemaVersion', schemaVersion);
       if (!useFixture && pdfFile) {
         form.append('pdf', pdfFile);
         const buf = await pdfFile.arrayBuffer();
@@ -411,10 +413,10 @@ export default function App() {
             <div className="space-y-6">
               <div className="border-b border-slate-200 pb-4">
                 <h1 className="font-display text-2xl font-bold tracking-tight text-slate-900 text-balance">
-                  Deterministic PDF to RDLC 2016 Verification Studio
+                  Deterministic PDF to RDLC 2008 / 2016 Verification Studio
                 </h1>
                 <p className="text-sm text-slate-600 mt-1 max-w-3xl">
-                  Zero-AI forensic PDF geometry extraction, v3 100% Full-Tablix RDLC 2016 synthesis, deduplicated native PageHeader/PageFooter, VB.NET logic verification, and live pixel-parity inspection.
+                  Zero-AI native vector PDF geometry extraction, Full-Tablix RDLC 2008 (default) or RDLC 2016 synthesis, native PageHeader/PageFooter, VB.NET logic verification, and live pixel-parity inspection.
                 </p>
               </div>
 
@@ -477,8 +479,21 @@ export default function App() {
                 </div>
 
                 <div className="pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-4">
-                  <div className="text-xs text-slate-600">
-                    100% deterministic offline conversion · v3 Full-Tablix RDLC 2016 body + native PageHeader/PageFooter
+                  <div className="flex flex-wrap items-center gap-3">
+                    <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700">
+                      <span>Target Schema:</span>
+                      <select
+                        value={schemaVersion}
+                        onChange={(e) => setSchemaVersion(e.target.value === '2016' ? '2016' : '2008')}
+                        className="px-2.5 py-1.5 text-xs font-mono border border-slate-300 rounded-md bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      >
+                        <option value="2008">RDLC 2008 (Default)</option>
+                        <option value="2016">RDLC 2016</option>
+                      </select>
+                    </label>
+                    <span className="text-xs text-slate-500">
+                      100% deterministic offline conversion · native PageHeader/PageFooter
+                    </span>
                   </div>
 
                   <div className="flex items-center gap-3">

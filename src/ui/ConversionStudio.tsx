@@ -30,6 +30,7 @@ export function ConversionStudio({ result, originalPdfBase64 }: ConversionStudio
   const [zoom, setZoom] = useState<ZoomOption>('fit');
   const [rightMode, setRightMode] = useState<RightPaneMode>('rendered');
   const [showBounds, setShowBounds] = useState(false);
+  const [showVectors, setShowVectors] = useState(false);
 
   const initialParamMap = useMemo(() => {
     const out: Record<string, string> = {};
@@ -159,6 +160,7 @@ export function ConversionStudio({ result, originalPdfBase64 }: ConversionStudio
   const pageWIn = result.reportDefinition.pageWidthIn || result.layoutModel.document.pageWidth || 8.27;
   const pageHIn = result.reportDefinition.pageHeightIn || result.layoutModel.document.pageHeight || 11.69;
   const hierarchy = result.reportDefinition.hierarchy;
+  const margins = result.reportDefinition.marginsIn ?? { top: 0, right: 0, bottom: 0, left: 0 };
   const bodySections = result.reportDefinition.bodySections ?? [];
   const bodyTablixes = result.reportDefinition.bodyTablixes ?? [];
   const activePageBodySections = bodySections.filter((s) => s.pageNumber === pageIdx + 1);
@@ -171,19 +173,90 @@ export function ConversionStudio({ result, originalPdfBase64 }: ConversionStudio
   const headerOffsetIn = showHeaderOnActivePage ? hierarchy!.pageHeader!.heightIn : 0;
   const firstSecTopIn =
     activePageBodySections.length > 0
-      ? activePageBodySections[0].topIn
+      ? Math.min(...activePageBodySections.map((s) => s.topIn))
       : activeHierarchySections.length > 0
-      ? activeHierarchySections[0].topIn
+      ? Math.min(...activeHierarchySections.map((s) => s.topIn))
       : 0;
+
+  const activeVectorPrimitives = result.layoutModel.pages[pageIdx]?.vectorPrimitives;
+
+  const renderVectorsOverlay = () => {
+    if (!showVectors || !activeVectorPrimitives) return null;
+    const vp = activeVectorPrimitives;
+    const fillBanners = vp.fillBanners ?? [];
+    const fillBands = vp.fillBands && vp.fillBands.length > 0 ? vp.fillBands : vp.fillBoxes;
+    return (
+      <svg
+        viewBox={`0 0 ${vp.pageWidthPt} ${vp.pageHeightPt}`}
+        preserveAspectRatio="none"
+        className="pointer-events-none absolute inset-0 w-full h-full"
+      >
+        {fillBands.map((fb, idx) => (
+          <rect
+            key={`band-${idx}`}
+            x={fb.x}
+            y={fb.y}
+            width={Math.max(0.5, fb.width)}
+            height={Math.max(0.5, fb.height)}
+            fill="rgba(245, 158, 11, 0.16)"
+            stroke="#F59E0B"
+            strokeWidth={0.75}
+          />
+        ))}
+        {fillBanners.map((fb, idx) => (
+          <rect
+            key={`banner-${idx}`}
+            x={fb.x}
+            y={fb.y}
+            width={Math.max(0.5, fb.width)}
+            height={Math.max(0.5, fb.height)}
+            fill="rgba(16, 185, 129, 0.20)"
+            stroke="#10B981"
+            strokeWidth={1.2}
+            strokeDasharray="3 2"
+          />
+        ))}
+        {vp.hLines.map((hl, idx) => (
+          <line
+            key={`hl-${idx}`}
+            x1={hl.x1}
+            y1={hl.y}
+            x2={hl.x2}
+            y2={hl.y}
+            stroke="#D946EF"
+            strokeWidth={Math.max(0.9, hl.lineWidthPt)}
+          />
+        ))}
+        {vp.vLines.map((vl, idx) => (
+          <line
+            key={`vl-${idx}`}
+            x1={vl.x}
+            y1={vl.y1}
+            x2={vl.x}
+            y2={vl.y2}
+            stroke="#06B6D4"
+            strokeWidth={Math.max(0.9, vl.lineWidthPt)}
+          />
+        ))}
+      </svg>
+    );
+  };
 
   const renderBoundsOverlay = () => {
     if (!showBounds) return null;
+    const printableOverlayWidthPct = (Math.max(0.5, pageWIn - margins.left - margins.right) / pageWIn) * 100;
+    const marginLeftPct = (margins.left / pageWIn) * 100;
     return (
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
         {showHeaderOnActivePage && hierarchy?.pageHeader && (
           <div
-            className="absolute left-0 right-0 top-0 border border-indigo-500/80 bg-indigo-500/5"
-            style={{ height: `${(hierarchy.pageHeader.heightIn / pageHIn) * 100}%` }}
+            className="absolute border border-indigo-500/80 bg-indigo-500/5"
+            style={{
+              left: `${marginLeftPct}%`,
+              width: `${printableOverlayWidthPct}%`,
+              top: `${(margins.top / pageHIn) * 100}%`,
+              height: `${(hierarchy.pageHeader.heightIn / pageHIn) * 100}%`,
+            }}
           >
             <span className="absolute top-0 left-0 bg-indigo-600 text-white font-mono text-[9px] px-1 leading-3">
               PageHeader ({(hierarchy.pageHeader.heightIn * 2.54).toFixed(2)}cm)
@@ -192,13 +265,13 @@ export function ConversionStudio({ result, originalPdfBase64 }: ConversionStudio
         )}
         {activePageBodySections.length > 0
           ? activePageBodySections.map((sec) => {
-              const secTopIn = headerOffsetIn + (sec.topIn - firstSecTopIn);
+              const secTopIn = margins.top + headerOffsetIn + (sec.topIn - firstSecTopIn);
               return (
                 <div
                   key={sec.name}
                   className="absolute border border-dashed border-blue-600/80 bg-blue-500/5"
                   style={{
-                    left: `${(sec.leftIn / pageWIn) * 100}%`,
+                    left: `${((margins.left + sec.leftIn) / pageWIn) * 100}%`,
                     top: `${(secTopIn / pageHIn) * 100}%`,
                     width: `${(sec.widthIn / pageWIn) * 100}%`,
                     height: `${(sec.heightIn / pageHIn) * 100}%`,
@@ -211,7 +284,7 @@ export function ConversionStudio({ result, originalPdfBase64 }: ConversionStudio
               );
             })
           : activeHierarchySections.map((sec) => {
-              const secTopIn = headerOffsetIn + (sec.topIn - firstSecTopIn);
+              const secTopIn = margins.top + headerOffsetIn + (sec.topIn - firstSecTopIn);
               const matchingTablix = bodyTablixes.find((t) => t.name === sec.name);
               const colWidths = matchingTablix?.columnWidthsIn ?? [];
               let runningColX = 0;
@@ -220,7 +293,7 @@ export function ConversionStudio({ result, originalPdfBase64 }: ConversionStudio
                   key={sec.name}
                   className="absolute border border-dashed border-blue-600/80 bg-blue-500/5"
                   style={{
-                    left: `${(sec.leftIn / pageWIn) * 100}%`,
+                    left: `${((margins.left + sec.leftIn) / pageWIn) * 100}%`,
                     top: `${(secTopIn / pageHIn) * 100}%`,
                     width: `${(sec.widthIn / pageWIn) * 100}%`,
                     height: `${(sec.heightIn / pageHIn) * 100}%`,
@@ -240,15 +313,20 @@ export function ConversionStudio({ result, originalPdfBase64 }: ConversionStudio
                       );
                     })}
                   <span className="absolute top-0 right-0 bg-blue-600 text-white font-mono text-[9px] px-1 leading-3">
-                    {sec.name} {sec.archetype ? `[${sec.archetype}]` : ''}
+                    {sec.name}
                   </span>
                 </div>
               );
             })}
         {hierarchy?.pageFooter && (
           <div
-            className="absolute left-0 right-0 bottom-0 border border-slate-700/80 bg-slate-700/5"
-            style={{ height: `${(hierarchy.pageFooter.heightIn / pageHIn) * 100}%` }}
+            className="absolute border border-slate-700/80 bg-slate-700/5"
+            style={{
+              left: `${marginLeftPct}%`,
+              width: `${printableOverlayWidthPct}%`,
+              bottom: `${(margins.bottom / pageHIn) * 100}%`,
+              height: `${(hierarchy.pageFooter.heightIn / pageHIn) * 100}%`,
+            }}
           >
             <span className="absolute bottom-0 left-0 bg-slate-800 text-white font-mono text-[9px] px-1 leading-3">
               PageFooter ({(hierarchy.pageFooter.heightIn * 2.54).toFixed(2)}cm)
@@ -268,7 +346,7 @@ export function ConversionStudio({ result, originalPdfBase64 }: ConversionStudio
             Side-by-Side Verification Studio
           </h2>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500 font-mono tabular-nums">
-            <span>RDLC 2016 ({result.rdlcSchemaVersion ?? '2016'})</span>
+            <span>RDLC {result.rdlcSchemaVersion ?? '2008'}</span>
             <span aria-hidden="true">·</span>
             <span title={result.rdlcSha256}>
               SHA-256: {result.rdlcSha256 ? result.rdlcSha256.slice(0, 12) : '—'}
@@ -391,6 +469,18 @@ export function ConversionStudio({ result, originalPdfBase64 }: ConversionStudio
             Section &amp; Column Bounds
           </button>
 
+          <button
+            onClick={() => setShowVectors((v) => !v)}
+            disabled={!activeVectorPrimitives}
+            className={`px-2.5 py-1 text-xs font-medium border rounded-md whitespace-nowrap shrink-0 transition-colors disabled:opacity-40 ${
+              showVectors
+                ? 'bg-emerald-700 text-white border-emerald-700'
+                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+            }`}
+          >
+            Vector Primitives
+          </button>
+
           <div className="flex items-center gap-1 p-0.5 bg-slate-100 rounded-md">
             {(['fit', 75, 100, 125, 150] as const).map((z) => (
               <button
@@ -432,8 +522,28 @@ export function ConversionStudio({ result, originalPdfBase64 }: ConversionStudio
       {/* Side-by-Side Split Viewport */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-stretch">
         <div className="border border-slate-200 rounded-md bg-slate-100 flex flex-col">
-          <div className="px-3 py-2 bg-white border-b border-slate-200 flex items-center justify-between text-xs">
+          <div className="px-3 py-2 bg-white border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
             <span className="font-semibold text-slate-900">Original Input PDF (Page {pageIdx + 1})</span>
+            {showVectors && activeVectorPrimitives && (
+              <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-slate-600">
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-2.5 h-2.5 inline-block border border-emerald-600 bg-emerald-500/20" />
+                  FillBanner ({activeVectorPrimitives.fillBanners?.length ?? 0})
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-2.5 h-2.5 inline-block border border-amber-500 bg-amber-500/20" />
+                  FillBand/Box ({(activeVectorPrimitives.fillBands ?? activeVectorPrimitives.fillBoxes).length})
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-3 h-0.5 inline-block bg-fuchsia-500" />
+                  HLine ({activeVectorPrimitives.hLines.length})
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-0.5 h-3 inline-block bg-cyan-500" />
+                  VLine ({activeVectorPrimitives.vLines.length})
+                </span>
+              </div>
+            )}
             <span className="font-mono text-slate-500 tabular-nums">
               {result.layoutModel.document.pageWidth.toFixed(2)}in ×{' '}
               {result.layoutModel.document.pageHeight.toFixed(2)}in
@@ -447,6 +557,7 @@ export function ConversionStudio({ result, originalPdfBase64 }: ConversionStudio
                   alt={`Original PDF Page ${pageIdx + 1}`}
                   className="w-full bg-white border border-slate-300 shadow-xs block"
                 />
+                {renderVectorsOverlay()}
                 {renderBoundsOverlay()}
               </div>
             ) : (

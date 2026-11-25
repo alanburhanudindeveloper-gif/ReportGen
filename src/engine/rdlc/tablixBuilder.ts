@@ -6,6 +6,7 @@ import {
   LayoutPage,
   LayoutRegion,
   RegionStyle,
+  RdlcSchemaVersion,
   ReportDefinition,
   ReportFieldDef,
   ReportParameterDef,
@@ -51,10 +52,13 @@ export class TablixBuilder {
 
   public buildReportDefinition(
     layout: IntermediateLayoutModel,
-    existingPattern?: ExistingProjectPattern
+    existingPattern?: ExistingProjectPattern,
+    schemaVersion: RdlcSchemaVersion = '2008'
   ): ReportDefinition {
-    const dataSourceName = existingPattern?.dataSourceName ?? 'dsReportSource';
-    const dataSetName = existingPattern?.dataSetName ?? 'dsReportData';
+    const dataSourceName =
+      existingPattern?.dataSourceName ?? (schemaVersion === '2008' ? 'DummyDataSource' : 'dsReportSource');
+    const dataSetName =
+      existingPattern?.dataSetName ?? (schemaVersion === '2008' ? 'dsReport' : 'dsReportData');
     const reportName = sanitizeIdentifier(layout.document.name, 'GeneratedReport');
 
     const fieldMap = new Map<string, ReportFieldDef>();
@@ -82,9 +86,12 @@ export class TablixBuilder {
 
     const paramCtx = createParameterDetectionContext(existingParams);
 
-    // Single-RDLC v2 engine always uses 0in page margins so ReportSection.Width == PageWidth
     const hasAnyLayer0 = layout.pages.some((p) => Boolean(p.layer0BackgroundBase64));
-    const marginsIn = { top: 0, right: 0, bottom: 0, left: 0 };
+    const margin075CmIn = roundIn(0.75 / 2.54);
+    const marginsIn =
+      schemaVersion === '2008'
+        ? { top: margin075CmIn, right: margin075CmIn, bottom: margin075CmIn, left: margin075CmIn }
+        : { top: 0, right: 0, bottom: 0, left: 0 };
 
     const printableWidthIn = Math.max(
       1.5,
@@ -432,7 +439,10 @@ export class TablixBuilder {
                 },
               ];
 
-        const boundRuns = parameterizeTextRuns(paramCtx, baseRuns, page.pageNumber, precedingLabel);
+        const boundRuns =
+          schemaVersion === '2008'
+            ? baseRuns
+            : parameterizeTextRuns(paramCtx, baseRuns, page.pageNumber, precedingLabel);
 
         const cleanStyle: RegionStyle = {
           ...r.style,
@@ -474,6 +484,10 @@ export class TablixBuilder {
       pages: layout.pages,
       pageWidthIn: printableWidthIn,
       pageHeightIn: printableHeightIn,
+      fullPageWidthIn: layout.document.pageWidth,
+      fullPageHeightIn: layout.document.pageHeight,
+      marginsIn,
+      schemaVersion,
       dataSetName,
       pageTablixesByPage,
       coveredByTablixFn: (pNum, x, y, w, h) => {
@@ -490,7 +504,7 @@ export class TablixBuilder {
       fieldMap,
     });
 
-    if (paramCtx.parameters.size === 0) {
+    if (schemaVersion === '2016' && paramCtx.parameters.size === 0) {
       paramCtx.parameters.set('ReportTitle', {
         name: 'ReportTitle',
         dataType: 'String',
@@ -543,13 +557,14 @@ export class TablixBuilder {
 
     return {
       reportName,
+      schemaVersion,
       dataSourceName,
       dataSetName,
       pageWidthIn: layout.document.pageWidth,
       pageHeightIn: layout.document.pageHeight,
       marginsIn,
       fields: Array.from(fieldMap.values()),
-      parameters: Array.from(paramCtx.parameters.values()),
+      parameters: schemaVersion === '2008' ? [] : Array.from(paramCtx.parameters.values()),
       calculations,
       tablixRegions: tablixRegions.length > 0 ? tablixRegions : v3Result.bodyTablixes,
       embeddedImages,

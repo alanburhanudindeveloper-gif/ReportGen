@@ -13,18 +13,30 @@ import {
   PDFRawStream,
   PDFRef,
 } from 'pdf-lib';
+import { PNG } from 'pngjs';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import {
   BandKind,
   IntermediateLayoutModel,
   LayoutPage,
   LayoutRegion,
+  PageVectorPrimitives,
   RegionStyle,
   ReportGenError,
   ReportGenErrorCode,
   StructuredLogger,
+  VectorFillBox,
   VisualTextRun,
 } from '../core/types.ts';
+import {
+  createRecordingCanvas,
+  createVirtualOwnerDocument,
+  deduplicateVectorPrimitives,
+  rasterizePrimitivesToRgba,
+  VirtualCanvasFactory,
+  withVirtualCanvasGlobals,
+} from './canvas2dVectorProxy.ts';
+import { scanPixelGeometry, TextBoxPt } from './pixelGeometryScanner.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -93,40 +105,19 @@ function roundIn(val: number): number {
   return Math.round(val * 1000) / 1000;
 }
 
-function rgbToHex(r: number, g: number, b: number): string {
-  const clamp = (n: number) => Math.max(0, Math.min(255, Math.round(n <= 1 ? n * 255 : n)));
-  const toHex = (n: number) => clamp(n).toString(16).padStart(2, '0').toUpperCase();
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+function roundPt(val: number): number {
+  return Math.round(val * 100) / 100;
 }
 
-function normalizeColorArgs(args: unknown[]): string | undefined {
-  if (args.length === 0) return undefined;
-  const a0 = args[0];
-  if (typeof a0 === 'string') {
-    const trimmed = a0.trim();
-    if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) return trimmed.toUpperCase();
-    if (/^#[0-9a-fA-F]{3}$/.test(trimmed)) {
-      const h = trimmed.slice(1);
-      return `#${h[0]}${h[0]}${h[1]}${h[1]}${h[2]}${h[2]}`.toUpperCase();
-    }
-    if (/^#[0-9a-fA-F]{8}$/.test(trimmed)) return trimmed.slice(0, 7).toUpperCase();
-  }
-  if (args.length >= 3 && typeof args[0] === 'number') {
-    return rgbToHex(Number(args[0]), Number(args[1]), Number(args[2]));
-  }
-  return undefined;
-}
-
-function grayToHex(gray: number): string {
-  const v = Math.max(0, Math.min(1, gray));
-  return rgbToHex(v, v, v);
-}
-
-function cmykToHex(c: number, m: number, y: number, k: number): string {
-  const r = (1 - Math.min(1, Math.max(0, c))) * (1 - Math.min(1, Math.max(0, k)));
-  const g = (1 - Math.min(1, Math.max(0, m))) * (1 - Math.min(1, Math.max(0, k)));
-  const b = (1 - Math.min(1, Math.max(0, y))) * (1 - Math.min(1, Math.max(0, k)));
-  return rgbToHex(r, g, b);
+function hexLuminancePt(hex?: string): number {
+  if (!hex) return 1;
+  const clean = hex.replace('#', '');
+  if (clean.length !== 6) return 1;
+  const r = parseInt(clean.slice(0, 2), 16);
+  const g = parseInt(clean.slice(2, 4), 16);
+  const b = parseInt(clean.slice(4, 6), 16);
+  if ([r, g, b].some((n) => Number.isNaN(n))) return 1;
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
 }
 
 function defaultStyle(): RegionStyle {
@@ -584,115 +575,277 @@ export class PdfAnalyzer {
     dpi = 150
   ): Promise<IntermediateLayoutModel> {
     this.logger.info('PdfAnalysis', `PDF analysis started for "${documentName}"`, { dpi });
-    try {
-      const loadingTask = pdfjsLib.getDocument({
-        data: new Uint8Array(pdfBytes),
-        useSystemFonts: true,
-        verbosity: 0,
-      });
-      const pdfDoc = await loadingTask.promise;
-      const numPages = pdfDoc.numPages;
+    return withVirtualCanvasGlobals(async () => {
+      try {
+        const loadingTask = pdfjsLib.getDocument({
+          data: new Uint8Array(pdfBytes),
+          CanvasFactory: VirtualCanvasFactory as unknown as object,
+          disableFontFace: false,
+          useSystemFonts: false,
+          ownerDocument: createVirtualOwnerDocument() as unknown as object,
+          verbosity: 0,
+        });
+        const pdfDoc = await loadingTask.promise;
+        const numPages = pdfDoc.numPages;
 
-      if (numPages === 0) {
-        throw new Error('PDF contains 0 pages');
-      }
+        if (numPages === 0) {
+          throw new Error('PDF contains 0 pages');
+        }
 
-      const pagePreviews = await this.rasterizePagesWithGhostscript(pdfBytes, dpi);
-      let lazyStrippedPreviews: Buffer[] | null = null;
-      const getTextStrippedPagePng = async (pageIdxZeroBased: number): Promise<Buffer | undefined> => {
-        if (lazyStrippedPreviews === null) {
+        let lazyStrippedBytes: Uint8Array | null = null;
+        const pagePngCache = new Map<string, Buffer | undefined>();
+
+        // Channel 1 pre-pass: render all PDF pages once at scale=2 (144 DPI) for text-masked pixel geometry scanning
+        const gs144Pngs = await this.rasterizePagesWithGhostscript(pdfBytes, 144);
+        gs144Pngs.forEach((pngBuf, idx) => {
+          pagePngCache.set(`${idx + 1}:144:r`, pngBuf);
+        });
+
+        const getSinglePagePng = async (
+          pageNum: number,
+          targetDpi: number,
+          stripped: boolean
+        ): Promise<Buffer | undefined> => {
+          const key = `${pageNum}:${targetDpi}:${stripped ? 's' : 'r'}`;
+          if (pagePngCache.has(key)) return pagePngCache.get(key);
+          let sourceBytes = pdfBytes;
+          if (stripped) {
+            if (lazyStrippedBytes === null) {
+              try {
+                lazyStrippedBytes = await this.stripTextOperatorsFromPdf(pdfBytes);
+              } catch (stripErr) {
+                this.logger.warn(
+                  'PdfAnalysis',
+                  `Text-stripped crop fallback triggered: ${stripErr instanceof Error ? stripErr.message : String(stripErr)}`
+                );
+                lazyStrippedBytes = pdfBytes;
+              }
+            }
+            sourceBytes = lazyStrippedBytes;
+          }
+          const png = await this.rasterizeSinglePageWithGhostscript(sourceBytes, pageNum, targetDpi);
+          pagePngCache.set(key, png);
+          return png;
+        };
+
+        const headerLogoCache = new Map<string, string>();
+        const pages: LayoutPage[] = [];
+        let regionSeq = 1;
+
+        for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+          const page = await pdfDoc.getPage(pageNum);
+          const viewport = page.getViewport({ scale: 1.0 });
+          const widthIn = roundIn(viewport.width / PT_PER_INCH);
+          const heightIn = roundIn(viewport.height / PT_PER_INCH);
+
+          const textContent = await page.getTextContent();
+          const rawItems = (textContent.items as PdfTextItem[]).filter(
+            (item) => typeof item.str === 'string' && item.str.trim().length > 0
+          );
+          const isDigitalVectorPage = rawItems.length > 0;
+
+          // Record Canvas2D vector operations + textColorEvents via VirtualCanvas proxy (captures XObjects/gradients cleanly)
+          const recCanvas = createRecordingCanvas(viewport.width, viewport.height);
           try {
-            const strippedBytes = await this.stripTextOperatorsFromPdf(pdfBytes);
-            lazyStrippedPreviews = await this.rasterizePagesWithGhostscript(strippedBytes, dpi);
-          } catch (stripErr) {
+            await page.render({
+              canvasContext: recCanvas.getContext('2d') as unknown as CanvasRenderingContext2D,
+              viewport,
+              canvas: null,
+            }).promise;
+          } catch (renderErr) {
             this.logger.warn(
               'PdfAnalysis',
-              `Text-stripped crop fallback triggered: ${stripErr instanceof Error ? stripErr.message : String(stripErr)}`
+              `Canvas2D vector recording warning on page ${pageNum}: ${renderErr instanceof Error ? renderErr.message : String(renderErr)}`
             );
-            lazyStrippedPreviews = [];
           }
-        }
-        return lazyStrippedPreviews.length === numPages
-          ? lazyStrippedPreviews[pageIdxZeroBased]
-          : pagePreviews[pageIdxZeroBased];
-      };
 
-      const pages: LayoutPage[] = [];
-      let regionSeq = 1;
-
-      for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-        const page = await pdfDoc.getPage(pageNum);
-        const viewport = page.getViewport({ scale: 1.0 });
-        const widthIn = roundIn(viewport.width / PT_PER_INCH);
-        const heightIn = roundIn(viewport.height / PT_PER_INCH);
-
-        const textContent = await page.getTextContent();
-        const opList = await page.getOperatorList();
-
-        const { vectorRects, imageBoxes, complexClusterBoxes, textColorEvents } =
-          this.extractVectorsAndImages(opList, viewport.height, widthIn, heightIn);
-
-        const regions: LayoutRegion[] = [];
-
-        for (let idx = 0; idx < vectorRects.length; idx++) {
-          const vr = vectorRects[idx];
-          const isLine = vr.height <= 0.04 || vr.width <= 0.04;
-          const minDim = isLine ? 0.006 : 0.015;
-          const style: RegionStyle = {
-            ...defaultStyle(),
-            backgroundColor: vr.fillColor,
-            borderColor: vr.strokeColor,
-            borderWidthPt: vr.lineWidthPt,
-          };
-          regions.push({
-            id: `region-${String(regionSeq++).padStart(4, '0')}`,
-            pageNumber: pageNum,
-            type: isLine ? 'vector_line' : 'vector_rect',
-            x: roundIn(vr.x),
-            y: roundIn(vr.y),
-            width: roundIn(Math.max(minDim, vr.width)),
-            height: roundIn(Math.max(minDim, vr.height)),
-            style,
-            semanticRole: 'unknown',
-            confidence: 0.95,
-            bandKind: classifyBandHeuristic(vr.y, heightIn),
-            isAmbiguous: false,
-            sourceObjectRefs: [`p${pageNum}-vec-${idx}`],
+          // Channel 1: Text-Masked Canvas Pixel Geometry Scanner at scale = 2 (144 DPI)
+          const textBoxesPt: TextBoxPt[] = rawItems.map((it) => {
+            const tx = it.transform;
+            const fontSizePt = Math.max(5.5, Math.hypot(tx[0], tx[1]) || Math.hypot(tx[2], tx[3]) || 10);
+            const yBaselinePt = viewport.height - tx[5];
+            const yTopPt = Math.max(0, yBaselinePt - fontSizePt * 0.85);
+            const wPt = Math.max(it.width || it.str.length * fontSizePt * 0.5, 4);
+            const hPt = Math.max(it.height || fontSizePt * 1.15, fontSizePt * 1.07);
+            return { x: tx[4], y: yTopPt, width: wPt, height: hPt };
           });
-        }
 
-        for (let idx = 0; idx < imageBoxes.length; idx++) {
-          const box = imageBoxes[idx];
-          const srcPng = (await getTextStrippedPagePng(pageNum - 1)) ?? pagePreviews[pageNum - 1];
-          const croppedBase64 = await this.cropPageRegionToBase64(
-            srcPng,
-            box,
-            widthIn,
-            heightIn
+          const scale2Png = gs144Pngs[pageNum - 1] ?? (await getSinglePagePng(pageNum, 144, false));
+          let rgbaScale2: { width: number; height: number; data: Uint8Array | Uint8ClampedArray } | undefined;
+          if (scale2Png) {
+            try {
+              const decoded = PNG.sync.read(scale2Png);
+              rgbaScale2 = { width: decoded.width, height: decoded.height, data: decoded.data };
+            } catch {
+              rgbaScale2 = undefined;
+            }
+          }
+          if (!rgbaScale2) {
+            rgbaScale2 = rasterizePrimitivesToRgba(recCanvas._recorder, viewport.width, viewport.height, 2);
+          }
+
+          const printableWidthPt = Math.max(viewport.width * 0.75, viewport.width - 72);
+          const pixelGeom = scanPixelGeometry(
+            rgbaScale2,
+            viewport.width,
+            viewport.height,
+            textBoxesPt,
+            printableWidthPt
           );
-          regions.push({
-            id: `region-${String(regionSeq++).padStart(4, '0')}`,
-            pageNumber: pageNum,
-            type: 'image',
-            x: roundIn(box.x),
-            y: roundIn(box.y),
-            width: roundIn(box.width),
-            height: roundIn(box.height),
-            style: defaultStyle(),
-            semanticRole: 'logoOrGraphic',
-            confidence: 0.96,
-            bandKind: classifyBandHeuristic(box.y, heightIn),
-            isAmbiguous: false,
-            preferImageFallback: true,
-            imageAssetBase64: croppedBase64,
-            imageAssetName: `EmbeddedGraphic_P${pageNum}_${idx + 1}`,
-            sourceObjectRefs: [`p${pageNum}-img-${idx}`],
-          });
-        }
 
-        const rawItems = (textContent.items as PdfTextItem[]).filter(
-          (item) => typeof item.str === 'string' && item.str.trim().length > 0
-        );
+          // Fuse Channel 1 pixel geometry + Canvas2D vector proxy primitives (preserving razor-thin CTM hairlines)
+          const deduped = deduplicateVectorPrimitives({
+            hLines: [...recCanvas._recorder.hLines, ...pixelGeom.hLines],
+            vLines: [...recCanvas._recorder.vLines, ...pixelGeom.vLines],
+            fillBoxes: [...recCanvas._recorder.fillBoxes, ...pixelGeom.fillBoxes],
+            curveBoxes: recCanvas._recorder.curveBoxes,
+            imageBoxes: recCanvas._recorder.imageBoxes,
+            textColorEvents: recCanvas._recorder.textColorEvents,
+          });
+
+          const mergeFillCollection = (
+            base: VectorFillBox[],
+            predicate: (fb: VectorFillBox) => boolean
+          ): VectorFillBox[] => {
+            const out: VectorFillBox[] = [...base];
+            for (const fb of deduped.fillBoxes) {
+              if (!predicate(fb)) continue;
+              const dup = out.some(
+                (o) =>
+                  Math.abs(o.x - fb.x) <= 3 &&
+                  Math.abs(o.y - fb.y) <= 3 &&
+                  Math.abs(o.width - fb.width) <= 4 &&
+                  Math.abs(o.height - fb.height) <= 4
+              );
+              if (!dup) out.push(fb);
+            }
+            return out.sort((a, b) => a.y - b.y || a.x - b.x);
+          };
+
+          const fillBanners = mergeFillCollection(
+            pixelGeom.fillBanners,
+            (fb) =>
+              fb.height >= 12 &&
+              fb.width >= 0.35 * printableWidthPt &&
+              hexLuminancePt(fb.fillHex) < 0.75
+          );
+          const fillBands = mergeFillCollection(
+            pixelGeom.fillBands,
+            (fb) => {
+              const lum = hexLuminancePt(fb.fillHex);
+              return lum >= 0.75 && lum <= 0.975 && fb.height >= 8 && fb.width >= 16;
+            }
+          );
+
+          const pageVectorPrimitives: PageVectorPrimitives = {
+            unit: 'pt',
+            pageWidthPt: roundPt(viewport.width),
+            pageHeightPt: roundPt(viewport.height),
+            hLines: deduped.hLines,
+            vLines: deduped.vLines,
+            fillBoxes: deduped.fillBoxes,
+            fillBanners,
+            fillBands,
+          };
+
+          const vectorRects: RawVectorRect[] = [
+            ...deduped.hLines.map((hl) => ({
+              x: hl.x1 / PT_PER_INCH,
+              y: hl.y / PT_PER_INCH,
+              width: Math.max(0.005, (hl.x2 - hl.x1) / PT_PER_INCH),
+              height: Math.max(0.005, (hl.lineWidthPt || 0.75) / PT_PER_INCH),
+              strokeColor: hl.strokeColor ?? '#94A3B8',
+              lineWidthPt: hl.lineWidthPt || 0.75,
+            })),
+            ...deduped.vLines.map((vl) => ({
+              x: vl.x / PT_PER_INCH,
+              y: vl.y1 / PT_PER_INCH,
+              width: Math.max(0.005, (vl.lineWidthPt || 0.75) / PT_PER_INCH),
+              height: Math.max(0.005, (vl.y2 - vl.y1) / PT_PER_INCH),
+              strokeColor: vl.strokeColor ?? '#94A3B8',
+              lineWidthPt: vl.lineWidthPt || 0.75,
+            })),
+            ...deduped.fillBoxes.map((fb) => ({
+              x: fb.x / PT_PER_INCH,
+              y: fb.y / PT_PER_INCH,
+              width: fb.width / PT_PER_INCH,
+              height: fb.height / PT_PER_INCH,
+              fillColor: fb.fillHex,
+              strokeColor: fb.strokeColor,
+              lineWidthPt: fb.lineWidthPt ?? 0.75,
+            })),
+          ];
+
+          const imageBoxes = deduped.imageBoxes.map((b) => ({
+            x: b.x / PT_PER_INCH,
+            y: b.y / PT_PER_INCH,
+            width: b.width / PT_PER_INCH,
+            height: b.height / PT_PER_INCH,
+          }));
+
+          const complexClusterBoxes: Array<{
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+            fallbackRect?: RawVectorRect;
+          }> = [];
+          const clusterPad = 0.12;
+          for (const cbPt of deduped.curveBoxes) {
+            const cb = {
+              x: cbPt.x / PT_PER_INCH,
+              y: cbPt.y / PT_PER_INCH,
+              width: cbPt.width / PT_PER_INCH,
+              height: cbPt.height / PT_PER_INCH,
+              fallbackRect:
+                cbPt.width / PT_PER_INCH > 0.2 && cbPt.height / PT_PER_INCH > 0.12
+                  ? {
+                      x: cbPt.x / PT_PER_INCH,
+                      y: cbPt.y / PT_PER_INCH,
+                      width: cbPt.width / PT_PER_INCH,
+                      height: cbPt.height / PT_PER_INCH,
+                      fillColor: cbPt.fillHex,
+                      strokeColor: cbPt.strokeColor,
+                      lineWidthPt: cbPt.lineWidthPt ?? 0.75,
+                    }
+                  : undefined,
+            };
+            const merged = complexClusterBoxes.find(
+              (existing) =>
+                cb.x <= existing.x + existing.width + clusterPad &&
+                cb.x + cb.width >= existing.x - clusterPad &&
+                cb.y <= existing.y + existing.height + clusterPad &&
+                cb.y + cb.height >= existing.y - clusterPad
+            );
+            if (merged) {
+              const x1 = Math.min(merged.x, cb.x);
+              const y1 = Math.min(merged.y, cb.y);
+              const x2 = Math.max(merged.x + merged.width, cb.x + cb.width);
+              const y2 = Math.max(merged.y + merged.height, cb.y + cb.height);
+              merged.x = x1;
+              merged.y = y1;
+              merged.width = x2 - x1;
+              merged.height = y2 - y1;
+              if (!merged.fallbackRect && cb.fallbackRect) merged.fallbackRect = cb.fallbackRect;
+            } else {
+              complexClusterBoxes.push(cb);
+            }
+          }
+          const filteredClusterBoxes = complexClusterBoxes.filter(
+            (b) =>
+              Math.max(b.width, b.height) >= 0.14 &&
+              Math.min(b.width, b.height) >= 0.08 &&
+              b.width <= widthIn + 0.05 &&
+              b.height <= 4.5
+          );
+
+          const textColorEvents: TextColorEvent[] = deduped.textColorEvents.map((ev) => ({
+            x: ev.x / PT_PER_INCH,
+            y: ev.y / PT_PER_INCH,
+            color: ev.color,
+          }));
+
+          const regions: LayoutRegion[] = [];
 
         const enrichedStyles: Record<string, { fontFamily?: string }> = {
           ...(textContent.styles ?? {}),
@@ -726,6 +879,234 @@ export class PdfAnalyzer {
           vectorRects
         );
 
+        // Detect top-left brand graphic + wordmark cluster in top margin (y < 0.12 * H) for 300 DPI HeaderLogo crop
+        const topLimitIn = heightIn * 0.12;
+        const leftZoneMaxIn = widthIn * 0.45;
+        const headerLogoCandidates = [
+          ...imageBoxes.map((b, idx) => ({ ...b, source: 'img' as const, idx })),
+          ...filteredClusterBoxes
+            .filter((b) => {
+              const overlapsText = mergedLines.some(
+                (ln) =>
+                  ln.x < b.x + b.width + 0.02 &&
+                  ln.x + ln.width > b.x - 0.02 &&
+                  ln.y < b.y + b.height + 0.02 &&
+                  ln.y + ln.height > b.y - 0.02
+              );
+              const strictlyInsideLine = mergedLines.some(
+                (ln) =>
+                  b.x >= ln.x - 0.01 &&
+                  b.x + b.width <= ln.x + ln.width + 0.01 &&
+                  b.y >= ln.y - 0.01 &&
+                  b.y + b.height <= ln.y + ln.height + 0.01
+              );
+              return !(overlapsText && b.width < 0.45 && b.height < 0.45 && strictlyInsideLine);
+            })
+            .map((b, idx) => ({ ...b, source: 'cluster' as const, idx })),
+        ].filter(
+          (b) =>
+            b.y < topLimitIn &&
+            b.y + b.height <= heightIn * 0.15 &&
+            b.x < widthIn * 0.35 &&
+            b.width >= 0.12 &&
+            b.width <= widthIn * 0.42 &&
+            b.height >= 0.10 &&
+            b.height <= 0.90
+        );
+
+        let headerLogoBox: { x: number; y: number; width: number; height: number } | undefined;
+        const absorbedHeaderImageIdxs = new Set<number>();
+        const absorbedHeaderClusterIdxs = new Set<number>();
+        const absorbedHeaderLineIdxs = new Set<number>();
+
+        if (headerLogoCandidates.length > 0) {
+          headerLogoCandidates.sort((a, b) => a.x - b.x || a.y - b.y);
+          const seed = headerLogoCandidates[0];
+          let minX = seed.x;
+          let minY = seed.y;
+          let maxX = seed.x + seed.width;
+          let maxY = seed.y + seed.height;
+
+          // Merge adjacent top-left graphic components (brand icon + vector wordmark strokes)
+          let changed = true;
+          while (changed) {
+            changed = false;
+            for (const cand of headerLogoCandidates) {
+              const cx2 = cand.x + cand.width;
+              const cy2 = cand.y + cand.height;
+              const alreadyInside =
+                cand.x >= minX - 0.005 && cx2 <= maxX + 0.005 && cand.y >= minY - 0.005 && cy2 <= maxY + 0.005;
+              const horizAdjacent = cand.x <= maxX + 0.45 && cx2 >= minX - 0.25 && cx2 <= leftZoneMaxIn;
+              const vertAligned = cand.y <= maxY + 0.08 && cy2 >= minY - 0.08;
+              if (!alreadyInside && horizAdjacent && vertAligned) {
+                minX = Math.min(minX, cand.x);
+                minY = Math.min(minY, cand.y);
+                maxX = Math.max(maxX, cx2);
+                maxY = Math.max(maxY, cy2);
+                changed = true;
+              }
+            }
+          }
+
+          // Include adjacent wordmark text span in top-left (same vertical band, to the right within 0.45in)
+          for (let lIdx = 0; lIdx < mergedLines.length; lIdx++) {
+            const ln = mergedLines[lIdx];
+            if (ln.y >= topLimitIn || ln.x + ln.width > leftZoneMaxIn) continue;
+            if (ln.text.trim().length > 32) continue;
+            const vertOverlap = Math.min(maxY + 0.08, ln.y + ln.height) - Math.max(minY - 0.08, ln.y);
+            const horizClose = ln.x <= maxX + 0.45 && ln.x + ln.width >= minX - 0.1;
+            if (vertOverlap > 0 && horizClose) {
+              minX = Math.min(minX, ln.x);
+              minY = Math.min(minY, ln.y);
+              maxX = Math.max(maxX, ln.x + ln.width);
+              maxY = Math.max(maxY, ln.y + ln.height);
+              absorbedHeaderLineIdxs.add(lIdx);
+            }
+          }
+
+          // Include any thin non-full-width colored vector rects inside this brand logo cluster
+          for (const vr of vectorRects) {
+            if (
+              vr.width < widthIn * 0.42 &&
+              vr.height < 0.9 &&
+              vr.x >= minX - 0.05 &&
+              vr.x + vr.width <= maxX + 0.05 &&
+              vr.y >= minY - 0.05 &&
+              vr.y + vr.height <= maxY + 0.05
+            ) {
+              minX = Math.min(minX, vr.x);
+              minY = Math.min(minY, vr.y);
+              maxX = Math.max(maxX, vr.x + vr.width);
+              maxY = Math.max(maxY, vr.y + vr.height);
+            }
+          }
+
+          const padIn = 2 / PT_PER_INCH;
+          const bx = Math.max(0, minX - padIn);
+          const by = Math.max(0, minY - padIn);
+          headerLogoBox = {
+            x: roundIn(bx),
+            y: roundIn(by),
+            width: roundIn(Math.min(widthIn - bx, maxX - minX + padIn * 2)),
+            height: roundIn(Math.min(heightIn - by, maxY - minY + padIn * 2)),
+          };
+
+          imageBoxes.forEach((b, idx) => {
+            if (
+              b.x < headerLogoBox!.x + headerLogoBox!.width + 0.02 &&
+              b.x + b.width > headerLogoBox!.x - 0.02 &&
+              b.y < headerLogoBox!.y + headerLogoBox!.height + 0.02 &&
+              b.y + b.height > headerLogoBox!.y - 0.02
+            ) {
+              absorbedHeaderImageIdxs.add(idx);
+            }
+          });
+          filteredClusterBoxes.forEach((b, idx) => {
+            if (
+              b.x < headerLogoBox!.x + headerLogoBox!.width + 0.02 &&
+              b.x + b.width > headerLogoBox!.x - 0.02 &&
+              b.y < headerLogoBox!.y + headerLogoBox!.height + 0.02 &&
+              b.y + b.height > headerLogoBox!.y - 0.02
+            ) {
+              absorbedHeaderClusterIdxs.add(idx);
+            }
+          });
+
+          const logoSig = `${Math.round(headerLogoBox.x * 20)}:${Math.round(headerLogoBox.y * 20)}:${Math.round(headerLogoBox.width * 20)}:${Math.round(headerLogoBox.height * 20)}`;
+          let logoBase64 = headerLogoCache.get(logoSig);
+          if (!logoBase64) {
+            const hiResPng = await getSinglePagePng(pageNum, 300, false);
+            logoBase64 = await this.cropPageRegionToBase64(hiResPng, headerLogoBox, widthIn, heightIn);
+            if (logoBase64) headerLogoCache.set(logoSig, logoBase64);
+          }
+
+          if (logoBase64) {
+            regions.push({
+              id: `region-${String(regionSeq++).padStart(4, '0')}`,
+              pageNumber: pageNum,
+              type: 'image',
+              x: headerLogoBox.x,
+              y: headerLogoBox.y,
+              width: headerLogoBox.width,
+              height: headerLogoBox.height,
+              style: defaultStyle(),
+              semanticRole: 'logoOrGraphic',
+              confidence: 0.99,
+              bandKind: 'Header',
+              isAmbiguous: false,
+              preferImageFallback: true,
+              imageAssetBase64: logoBase64,
+              imageAssetName: 'HeaderLogo',
+              sourceObjectRefs: [`p${pageNum}-header-logo`],
+            });
+          }
+        }
+
+        for (let idx = 0; idx < vectorRects.length; idx++) {
+          const vr = vectorRects[idx];
+          if (
+            headerLogoBox &&
+            vr.width < widthIn * 0.42 &&
+            vr.height < 0.9 &&
+            vr.x >= headerLogoBox.x - 0.03 &&
+            vr.x + vr.width <= headerLogoBox.x + headerLogoBox.width + 0.03 &&
+            vr.y >= headerLogoBox.y - 0.03 &&
+            vr.y + vr.height <= headerLogoBox.y + headerLogoBox.height + 0.03
+          ) {
+            continue;
+          }
+          const isLine = vr.height <= 0.04 || vr.width <= 0.04;
+          const minDim = isLine ? 0.006 : 0.015;
+          const style: RegionStyle = {
+            ...defaultStyle(),
+            backgroundColor: vr.fillColor,
+            borderColor: vr.strokeColor,
+            borderWidthPt: vr.lineWidthPt,
+          };
+          regions.push({
+            id: `region-${String(regionSeq++).padStart(4, '0')}`,
+            pageNumber: pageNum,
+            type: isLine ? 'vector_line' : 'vector_rect',
+            x: roundIn(vr.x),
+            y: roundIn(vr.y),
+            width: roundIn(Math.max(minDim, vr.width)),
+            height: roundIn(Math.max(minDim, vr.height)),
+            style,
+            semanticRole: 'unknown',
+            confidence: 0.95,
+            bandKind: classifyBandHeuristic(vr.y, heightIn),
+            isAmbiguous: false,
+            sourceObjectRefs: [`p${pageNum}-vec-${idx}`],
+          });
+        }
+
+        for (let idx = 0; idx < imageBoxes.length; idx++) {
+          if (absorbedHeaderImageIdxs.has(idx)) continue;
+          const box = imageBoxes[idx];
+          const srcPng =
+            (await getSinglePagePng(pageNum, dpi, true)) ?? (await getSinglePagePng(pageNum, dpi, false));
+          const croppedBase64 = await this.cropPageRegionToBase64(srcPng, box, widthIn, heightIn);
+          if (!croppedBase64) continue;
+          regions.push({
+            id: `region-${String(regionSeq++).padStart(4, '0')}`,
+            pageNumber: pageNum,
+            type: 'image',
+            x: roundIn(box.x),
+            y: roundIn(box.y),
+            width: roundIn(box.width),
+            height: roundIn(box.height),
+            style: defaultStyle(),
+            semanticRole: 'logoOrGraphic',
+            confidence: 0.96,
+            bandKind: classifyBandHeuristic(box.y, heightIn),
+            isAmbiguous: false,
+            preferImageFallback: true,
+            imageAssetBase64: croppedBase64,
+            imageAssetName: `EmbeddedGraphic_P${pageNum}_${idx + 1}`,
+            sourceObjectRefs: [`p${pageNum}-img-${idx}`],
+          });
+        }
+
         let brokenGlyphRegions = 0;
         for (let idx = 0; idx < brokenGlyphSpans.length; idx++) {
           const bSpan = brokenGlyphSpans[idx];
@@ -736,12 +1117,8 @@ export class PdfAnalyzer {
             width: Math.min(widthIn - Math.max(0, bSpan.x - padIn), bSpan.width + padIn * 2),
             height: Math.min(heightIn - Math.max(0, bSpan.y - padIn), bSpan.height + padIn * 2),
           };
-          const croppedBase64 = await this.cropPageRegionToBase64(
-            pagePreviews[pageNum - 1],
-            cropBox,
-            widthIn,
-            heightIn
-          );
+          const rawPng = await getSinglePagePng(pageNum, dpi, false);
+          const croppedBase64 = await this.cropPageRegionToBase64(rawPng, cropBox, widthIn, heightIn);
           if (!croppedBase64) continue;
           brokenGlyphRegions++;
           regions.push({
@@ -765,7 +1142,9 @@ export class PdfAnalyzer {
         }
 
         const iconClusters: Array<{ x: number; y: number; width: number; height: number; fallbackRect?: RawVectorRect }> = [];
-        for (const box of complexClusterBoxes) {
+        for (let cIdx = 0; cIdx < filteredClusterBoxes.length; cIdx++) {
+          if (absorbedHeaderClusterIdxs.has(cIdx)) continue;
+          const box = filteredClusterBoxes[cIdx];
           const enclosedText = mergedLines.filter(
             (ln) =>
               ln.x >= box.x - 0.08 &&
@@ -781,7 +1160,6 @@ export class PdfAnalyzer {
               ln.y + ln.height > box.y - 0.02
           );
           const isTopCoverBanner = box.y < 1.8 && box.width > 2.0 && box.height >= 0.4;
-          // Filter out multi-line rounded-corner text containers unless fallbackRect converts them to native rectangles
           if (!isTopCoverBanner && ((box.width > 2.2 && enclosedText.length >= 2) || enclosedText.length >= 4)) {
             if (box.fallbackRect) {
               const fb = box.fallbackRect;
@@ -809,9 +1187,7 @@ export class PdfAnalyzer {
             }
             continue;
           }
-          // Skip tiny curves that were merely curved vector glyphs inside or adjacent to normal text when there's no banner fill
           if (overlapsText && box.width < 0.45 && box.height < 0.45 && enclosedText.length === 0) {
-            // Keep standalone timeline dots/icons that sit outside text line boxes
             const strictlyInsideLine = mergedLines.some(
               (ln) =>
                 box.x >= ln.x - 0.01 &&
@@ -826,13 +1202,9 @@ export class PdfAnalyzer {
 
         for (let idx = 0; idx < iconClusters.length; idx++) {
           const box = iconClusters[idx];
-          const srcPng = (await getTextStrippedPagePng(pageNum - 1)) ?? pagePreviews[pageNum - 1];
-          const croppedBase64 = await this.cropPageRegionToBase64(
-            srcPng,
-            box,
-            widthIn,
-            heightIn
-          );
+          const srcPng =
+            (await getSinglePagePng(pageNum, dpi, true)) ?? (await getSinglePagePng(pageNum, dpi, false));
+          const croppedBase64 = await this.cropPageRegionToBase64(srcPng, box, widthIn, heightIn);
           if (!croppedBase64) continue;
           regions.push({
             id: `region-${String(regionSeq++).padStart(4, '0')}`,
@@ -855,6 +1227,7 @@ export class PdfAnalyzer {
         }
 
         for (let idx = 0; idx < mergedLines.length; idx++) {
+          if (absorbedHeaderLineIdxs.has(idx)) continue;
           const line = mergedLines[idx];
           const bandKind = classifyBandHeuristic(line.y, heightIn);
           const enclosingRect = vectorRects
@@ -904,11 +1277,38 @@ export class PdfAnalyzer {
           });
         }
 
+        // Fallback image capture ONLY when a page contains zero extractable vector text characters
+        let fallbackPreviewPng: Buffer | undefined;
+        if (!isDigitalVectorPage && imageBoxes.length === 0 && iconClusters.length === 0) {
+          fallbackPreviewPng = await getSinglePagePng(pageNum, dpi, false);
+          if (fallbackPreviewPng) {
+            regions.push({
+              id: `region-${String(regionSeq++).padStart(4, '0')}`,
+              pageNumber: pageNum,
+              type: 'image',
+              x: 0,
+              y: 0,
+              width: widthIn,
+              height: heightIn,
+              style: defaultStyle(),
+              semanticRole: 'logoOrGraphic',
+              confidence: 0.8,
+              bandKind: 'Detail',
+              isAmbiguous: true,
+              preferImageFallback: true,
+              imageAssetBase64: fallbackPreviewPng.toString('base64'),
+              imageAssetName: `ScannedPage_P${pageNum}`,
+              sourceObjectRefs: [`p${pageNum}-scanned`],
+            });
+          }
+        }
+
         const rawObjectCount = rawItems.length + vectorRects.length + imageBoxes.length;
         this.logger.info('PdfAnalysis', `Page ${pageNum} analyzed`, {
+          mode: isDigitalVectorPage ? 'native-vector' : 'raster-fallback',
           rawObjects: rawObjectCount,
           normalizedRegions: regions.length,
-          localizedGraphics: imageBoxes.length + iconClusters.length,
+          localizedGraphics: imageBoxes.length + iconClusters.length + (headerLogoBox ? 1 : 0),
           brokenGlyphRegions,
           deduplicatedSpans,
         });
@@ -920,7 +1320,8 @@ export class PdfAnalyzer {
           rawObjectCount,
           regions,
           bands: [],
-          rasterPreviewBase64: pagePreviews[pageNum - 1]?.toString('base64'),
+          vectorPrimitives: pageVectorPrimitives,
+          rasterPreviewBase64: fallbackPreviewPng?.toString('base64'),
           brokenGlyphRegions,
           deduplicatedSpans,
         });
@@ -943,6 +1344,7 @@ export class PdfAnalyzer {
       this.logger.error('PdfAnalysis', `PDF analysis failed: ${msg}`);
       throw new ReportGenError(ReportGenErrorCode.PDF_ANALYSIS_FAILED, msg, err);
     }
+    });
   }
 
   private extractNormalizedTextLines(
@@ -1030,7 +1432,9 @@ export class PdfAnalyzer {
     const brokenGlyphSpans = rawSpans.filter((s) => s.brokenGlyph);
     const cleanSpans = rawSpans.filter((s) => !s.brokenGlyph);
 
-    cleanSpans.sort((a, b) => (Math.abs(a.baselineY - b.baselineY) <= 0.028 ? a.x - b.x : a.baselineY - b.baselineY));
+    cleanSpans.sort((a, b) =>
+      Math.abs(a.baselineY - b.baselineY) * PT_PER_INCH <= 1.5 ? a.x - b.x : a.baselineY - b.baselineY
+    );
 
     // Step A: Deduplicate fake-bold / double-stroked / stacked duplicate spans
     const dedupedSpans: NormalizedSpan[] = [];
@@ -1054,7 +1458,7 @@ export class PdfAnalyzer {
       }
     }
 
-    // Build vertical edge barriers from vector lines & bordered/filled rectangles so justified prose merges cleanly inside cards/columns without crossing column/cell boundaries
+    // Build vertical edge barriers from vector lines & bordered/filled rectangles
     const verticalBarriers: Array<{ x: number; y1: number; y2: number }> = [];
     for (const vr of vectorRects) {
       if (vr.width <= 0.05 && vr.height >= 0.10) {
@@ -1071,29 +1475,33 @@ export class PdfAnalyzer {
       );
     };
 
-    // Step B: Merge contiguous horizontal spans sharing the same baseline into inline VisualTextRuns
+    // Step B: Merge horizontal spans sharing the same baseline (|Δy| <= 1.5pt), preserving full-justified lines
     const mergedLines: MergedTextLine[] = [];
     for (const cur of dedupedSpans) {
       const prev = mergedLines[mergedLines.length - 1];
-      const gap = prev ? cur.x - (prev.x + prev.width) : Infinity;
+      const gapIn = prev ? cur.x - (prev.x + prev.width) : Infinity;
+      const gapPt = gapIn * PT_PER_INCH;
 
       const prevBaselineY = prev ? prev.y + (prev.fontSizePt * 0.85) / PT_PER_INCH : 0;
       const curTrim = cur.text.trim();
       const prevTrim = prev ? prev.text.trim() : '';
+      const minFontPt = prev ? Math.min(prev.fontSizePt, cur.fontSizePt) : cur.fontSizePt;
 
-      const sameBaselineY = prev && Math.abs(prevBaselineY - cur.baselineY) <= 0.028;
-      const blockedByColon = Boolean(prev && prevTrim.endsWith(':') && gap > 0.07);
-      const blockedByTableNumericGutter = Boolean(
+      const sameBaselineY = prev && Math.abs(prevBaselineY - cur.baselineY) * PT_PER_INCH <= 1.5;
+      const blockedByColon = Boolean(
         prev &&
-          gap > 0.115 &&
-          (/^[0-9.,Rp%\-$€£()+\/]+$/i.test(curTrim) || /^Plan\s+\d+/i.test(curTrim)) &&
-          (/^[0-9.,Rp%\-$€£()+\/]+$/i.test(prevTrim) || prevTrim.length <= 20)
+          ((prevTrim.endsWith(':') && gapPt > minFontPt * 0.55) ||
+            (curTrim === ':' && gapPt > minFontPt * 0.65) ||
+            (prevTrim === '=' && gapPt > minFontPt * 0.55) ||
+            (curTrim === '=' && gapPt > minFontPt * 0.65))
       );
-      const isHangingMarker = /^(?:\d{1,2}\.|[a-z]\.|[•●○▪▫■□‣⁃-])$/i.test(prevTrim);
-      const blockedByHangingMarker = Boolean(prev && isHangingMarker && gap > 0.045);
+      const isHangingMarker = /^(?:\d+(?:\.\d+)*[\.\)]|\([a-z0-9]+\)|[a-z][\.\)]|[•●○▪▫■□‣⁃\-–*])$/i.test(
+        prevTrim
+      );
+      const blockedByHangingMarker = Boolean(prev && isHangingMarker && gapPt > minFontPt * 0.35);
       const blockedByBarrier = Boolean(
         prev &&
-          gap > 0.04 &&
+          gapPt > minFontPt * 0.25 &&
           crossesVerticalBarrier(
             prev.x + prev.width,
             cur.x,
@@ -1102,22 +1510,30 @@ export class PdfAnalyzer {
           )
       );
 
+      const maxJustifiedGapPt = minFontPt * 1.8;
       const sameBaseline =
         Boolean(sameBaselineY) &&
-        gap >= -0.035 &&
-        gap <= 0.22 &&
+        gapPt >= -2.5 &&
+        gapPt <= maxJustifiedGapPt &&
         Math.abs(prev!.fontSizePt - cur.fontSizePt) <= 2.2 &&
         !blockedByColon &&
-        !blockedByTableNumericGutter &&
         !blockedByHangingMarker &&
         !blockedByBarrier;
 
       if (sameBaseline && prev) {
         const lastRun = prev.runs[prev.runs.length - 1];
+        const lastChar = lastRun.text.slice(-1);
+        const firstChar = cur.text.charAt(0);
+        const parenAlphaTransition = lastChar === ')' && /^[A-Za-z0-9]/.test(firstChar);
+        const keepParenNumberTight =
+          (lastChar === '(' && /^[0-9.,-]/.test(firstChar) && gapPt <= minFontPt * 0.35) ||
+          (/^[),.;:%]$/.test(firstChar) && gapPt <= minFontPt * 0.35);
+
         const needsSpace =
-          gap > 0.022 &&
+          !keepParenNumberTight &&
           !lastRun.text.endsWith(' ') &&
-          !cur.text.startsWith(' ');
+          !cur.text.startsWith(' ') &&
+          (gapPt > minFontPt * 0.18 || parenAlphaTransition);
         const spacer = needsSpace ? ' ' : '';
 
         const sameRunStyle =
@@ -1182,465 +1598,32 @@ export class PdfAnalyzer {
     return { mergedLines, brokenGlyphSpans, deduplicatedSpans };
   }
 
-  private extractVectorsAndImages(
-    opList: { fnArray: number[]; argsArray: unknown[][] },
-    pageHeightPt: number,
-    pageWidthIn: number,
-    pageHeightIn: number
-  ): {
-    vectorRects: RawVectorRect[];
-    imageBoxes: Array<{ x: number; y: number; width: number; height: number }>;
-    complexClusterBoxes: Array<{ x: number; y: number; width: number; height: number; fallbackRect?: RawVectorRect }>;
-    textColorEvents: TextColorEvent[];
-  } {
-    const OPS = pdfjsLib.OPS;
-    const vectorRects: RawVectorRect[] = [];
-    const imageBoxes: Array<{ x: number; y: number; width: number; height: number }> = [];
-    const curveBoxes: Array<{ x: number; y: number; width: number; height: number; fallbackRect?: RawVectorRect }> = [];
-    const textColorEvents: TextColorEvent[] = [];
-
-    interface GState {
-      ctm: number[];
-      strokeColor: string;
-      fillColor?: string;
-      lineWidthPt: number;
+  private async rasterizeSinglePageWithGhostscript(
+    pdfBytes: Uint8Array,
+    pageNum: number,
+    dpi = 150
+  ): Promise<Buffer | undefined> {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reportgen-gs-pg-'));
+    const inputPath = path.join(tmpDir, 'input.pdf');
+    const outFile = path.join(tmpDir, 'page.png');
+    try {
+      fs.writeFileSync(inputPath, pdfBytes);
+      await execFileAsync('gs', [
+        '-dNOPAUSE',
+        '-dBATCH',
+        `-dFirstPage=${pageNum}`,
+        `-dLastPage=${pageNum}`,
+        '-sDEVICE=png16m',
+        `-r${dpi}`,
+        `-sOutputFile=${outFile}`,
+        inputPath,
+      ]);
+      return fs.existsSync(outFile) ? fs.readFileSync(outFile) : undefined;
+    } catch {
+      return undefined;
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
-
-    const gStack: GState[] = [
-      {
-        ctm: [1, 0, 0, 1, 0, 0],
-        strokeColor: '#CBD5E1',
-        fillColor: undefined,
-        lineWidthPt: 0.75,
-      },
-    ];
-
-    const applyCtm = (m: number[], x: number, y: number): [number, number] => [
-      m[0] * x + m[2] * y + m[4],
-      m[1] * x + m[3] * y + m[5],
-    ];
-
-    const mulMatrix = (a: number[], b: number[]): number[] => [
-      a[0] * b[0] + a[2] * b[1],
-      a[1] * b[0] + a[3] * b[1],
-      a[0] * b[2] + a[2] * b[3],
-      a[1] * b[2] + a[3] * b[3],
-      a[0] * b[4] + a[2] * b[5] + a[4],
-      a[1] * b[4] + a[3] * b[5] + a[5],
-    ];
-
-    let pendingRects: Array<{ x: number; y: number; w: number; h: number }> = [];
-    let pendingLines: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
-    let curX = 0;
-    let curY = 0;
-    let tm = [1, 0, 0, 1, 0, 0];
-    let tlm = [1, 0, 0, 1, 0, 0];
-    let textLeading = 0;
-
-    const emitPathShapes = (
-      subpaths: Array<{ pts: Array<{ x: number; y: number }>; hasCurves: boolean }>,
-      hasFill: boolean,
-      hasStroke: boolean,
-      fillCol: string | undefined,
-      strokeCol: string,
-      lw: number
-    ) => {
-      for (const sp of subpaths) {
-        if (sp.pts.length < 2) continue;
-        const xs = sp.pts.map((p) => p.x);
-        const ys = sp.pts.map((p) => p.y);
-        const minX = Math.min(...xs);
-        const maxX = Math.max(...xs);
-        const minY = Math.min(...ys);
-        const maxY = Math.max(...ys);
-        const w = maxX - minX;
-        const h = maxY - minY;
-
-        if (w <= 0.008 && h <= 0.008) continue;
-
-        if (
-          w > pageWidthIn - 0.15 &&
-          h > pageHeightIn - 0.15 &&
-          (!fillCol || fillCol === '#FFFFFF')
-        ) {
-          continue;
-        }
-
-        if (sp.hasCurves) {
-          if (w >= 0.04 && h >= 0.04 && w <= pageWidthIn + 0.1 && h <= 4.5 && (hasFill || hasStroke)) {
-            curveBoxes.push({
-              x: Math.max(0, minX),
-              y: Math.max(0, minY),
-              width: Math.min(pageWidthIn - Math.max(0, minX), w),
-              height: h,
-              fallbackRect:
-                w > 0.2 && h > 0.12
-                  ? {
-                      x: Math.max(0, minX),
-                      y: Math.max(0, minY),
-                      width: Math.min(pageWidthIn - Math.max(0, minX), w),
-                      height: h,
-                      fillColor: hasFill ? fillCol : undefined,
-                      strokeColor: hasStroke ? strokeCol : undefined,
-                      lineWidthPt: lw,
-                    }
-                  : undefined,
-            });
-          } else if (w > 0.2 && h > 0.12 && (hasFill || hasStroke)) {
-            vectorRects.push({
-              x: Math.max(0, minX),
-              y: Math.max(0, minY),
-              width: w,
-              height: h,
-              fillColor: hasFill ? fillCol : undefined,
-              strokeColor: hasStroke ? strokeCol : undefined,
-              lineWidthPt: lw,
-            });
-          }
-          continue;
-        }
-
-        const isThinLine = h <= 0.035 || w <= 0.035;
-        if (isThinLine) {
-          const lineThicknessIn = Math.max(0.005, lw / PT_PER_INCH);
-          vectorRects.push({
-            x: Math.max(0, minX),
-            y: Math.max(0, minY),
-            width: w <= 0.035 ? Math.max(lineThicknessIn, w) : w,
-            height: h <= 0.035 ? Math.max(lineThicknessIn, h) : h,
-            strokeColor: hasStroke ? strokeCol : fillCol,
-            fillColor: hasFill ? fillCol : undefined,
-            lineWidthPt: lw,
-          });
-        } else if (hasFill || hasStroke) {
-          vectorRects.push({
-            x: Math.max(0, minX),
-            y: Math.max(0, minY),
-            width: w,
-            height: h,
-            strokeColor: hasStroke ? strokeCol : undefined,
-            fillColor: hasFill ? fillCol : undefined,
-            lineWidthPt: lw,
-          });
-        }
-      }
-    };
-
-    for (let i = 0; i < opList.fnArray.length; i++) {
-      const fn = opList.fnArray[i];
-      const args = opList.argsArray[i] ?? [];
-      const gs = gStack[gStack.length - 1];
-      const ctm = gs.ctm;
-
-      if (fn === OPS.save) {
-        gStack.push({
-          ctm: [...gs.ctm],
-          strokeColor: gs.strokeColor,
-          fillColor: gs.fillColor,
-          lineWidthPt: gs.lineWidthPt,
-        });
-      } else if (fn === OPS.restore) {
-        if (gStack.length > 1) gStack.pop();
-      } else if (fn === OPS.transform && args.length >= 6) {
-        gs.ctm = mulMatrix(ctm, args as number[]);
-      } else if (fn === OPS.setLineWidth && typeof args[0] === 'number') {
-        gs.lineWidthPt = Math.max(0.4, args[0]);
-      } else if (fn === OPS.setStrokeRGBColor) {
-        const c = normalizeColorArgs(args);
-        if (c) gs.strokeColor = c;
-      } else if (fn === OPS.setFillRGBColor) {
-        const c = normalizeColorArgs(args);
-        if (c) gs.fillColor = c;
-      } else if (fn === OPS.setFillGray && typeof args[0] === 'number') {
-        gs.fillColor = grayToHex(args[0]);
-      } else if (fn === OPS.setStrokeGray && typeof args[0] === 'number') {
-        gs.strokeColor = grayToHex(args[0]);
-      } else if (fn === OPS.setFillCMYKColor && args.length >= 4) {
-        gs.fillColor = cmykToHex(Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]));
-      } else if (fn === OPS.setStrokeCMYKColor && args.length >= 4) {
-        gs.strokeColor = cmykToHex(Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]));
-      } else if (fn === OPS.beginText) {
-        tm = [1, 0, 0, 1, 0, 0];
-        tlm = [1, 0, 0, 1, 0, 0];
-      } else if (fn === OPS.setLeading && typeof args[0] === 'number') {
-        textLeading = Number(args[0]);
-      } else if (fn === OPS.setTextMatrix && args.length >= 1) {
-        const rawMat =
-          args.length >= 6
-            ? args
-            : args[0] && typeof (args[0] as Record<number, unknown>)[0] === 'number'
-              ? Array.from({ length: 6 }, (_, idx) => Number((args[0] as Record<number, number>)[idx]))
-              : null;
-        if (rawMat && rawMat.length >= 6) {
-          tm = [
-            Number(rawMat[0]),
-            Number(rawMat[1]),
-            Number(rawMat[2]),
-            Number(rawMat[3]),
-            Number(rawMat[4]),
-            Number(rawMat[5]),
-          ];
-          tlm = [...tm];
-        }
-      } else if ((fn === OPS.moveText || fn === OPS.setLeadingMoveText) && args.length >= 2) {
-        if (fn === OPS.setLeadingMoveText) {
-          textLeading = -Number(args[1]);
-        }
-        tlm = mulMatrix(tlm, [1, 0, 0, 1, Number(args[0]), Number(args[1])]);
-        tm = [...tlm];
-      } else if (fn === OPS.nextLine || fn === OPS.nextLineShowText || fn === OPS.nextLineSetSpacingShowText) {
-        tlm = mulMatrix(tlm, [1, 0, 0, 1, 0, -textLeading]);
-        tm = [...tlm];
-        if (fn === OPS.nextLineShowText || fn === OPS.nextLineSetSpacingShowText) {
-          const composed = mulMatrix(ctm, tm);
-          textColorEvents.push({
-            x: composed[4] / PT_PER_INCH,
-            y: (pageHeightPt - composed[5]) / PT_PER_INCH,
-            color: gs.fillColor ?? '#0F172A',
-          });
-        }
-      } else if (fn === OPS.showText || fn === OPS.showSpacedText) {
-        const composed = mulMatrix(ctm, tm);
-        const pxIn = composed[4] / PT_PER_INCH;
-        const pyIn = (pageHeightPt - composed[5]) / PT_PER_INCH;
-        textColorEvents.push({
-          x: pxIn,
-          y: pyIn,
-          color: gs.fillColor ?? '#0F172A',
-        });
-      } else if (fn === OPS.constructPath && typeof args[0] === 'number') {
-        const paintOp = args[0] as number;
-        const hasFill =
-          paintOp === OPS.fill ||
-          paintOp === OPS.eoFill ||
-          paintOp === OPS.fillStroke ||
-          paintOp === OPS.eoFillStroke;
-        const hasStroke =
-          paintOp === OPS.stroke ||
-          paintOp === OPS.closeStroke ||
-          paintOp === OPS.fillStroke ||
-          paintOp === OPS.eoFillStroke;
-
-        const rawBuf = Array.isArray(args[1]) ? (args[1][0] as ArrayLike<number> | undefined) : undefined;
-        const subpaths: Array<{ pts: Array<{ x: number; y: number }>; hasCurves: boolean }> = [];
-        let active: { pts: Array<{ x: number; y: number }>; hasCurves: boolean } | null = null;
-
-        if (rawBuf && rawBuf.length > 0) {
-          let k = 0;
-          while (k < rawBuf.length) {
-            const code = rawBuf[k++];
-            if (code === 0 && k + 1 < rawBuf.length) {
-              if (active && active.pts.length >= 2) subpaths.push(active);
-              const [px, py] = applyCtm(ctm, Number(rawBuf[k]), Number(rawBuf[k + 1]));
-              active = {
-                pts: [{ x: px / PT_PER_INCH, y: (pageHeightPt - py) / PT_PER_INCH }],
-                hasCurves: false,
-              };
-              k += 2;
-            } else if (code === 1 && k + 1 < rawBuf.length) {
-              const [px, py] = applyCtm(ctm, Number(rawBuf[k]), Number(rawBuf[k + 1]));
-              if (!active) active = { pts: [], hasCurves: false };
-              active.pts.push({ x: px / PT_PER_INCH, y: (pageHeightPt - py) / PT_PER_INCH });
-              k += 2;
-            } else if (code === 2 && k + 5 < rawBuf.length) {
-              const [px, py] = applyCtm(ctm, Number(rawBuf[k + 4]), Number(rawBuf[k + 5]));
-              if (!active) active = { pts: [], hasCurves: false };
-              active.hasCurves = true;
-              active.pts.push({ x: px / PT_PER_INCH, y: (pageHeightPt - py) / PT_PER_INCH });
-              k += 6;
-            } else if (code === 3 && k + 3 < rawBuf.length) {
-              const [px, py] = applyCtm(ctm, Number(rawBuf[k + 2]), Number(rawBuf[k + 3]));
-              if (!active) active = { pts: [], hasCurves: false };
-              active.hasCurves = true;
-              active.pts.push({ x: px / PT_PER_INCH, y: (pageHeightPt - py) / PT_PER_INCH });
-              k += 4;
-            } else if (code === 4) {
-              if (active && active.pts.length >= 2) subpaths.push(active);
-              active = null;
-            } else {
-              break;
-            }
-          }
-          if (active && active.pts.length >= 2) subpaths.push(active);
-        }
-        emitPathShapes(subpaths, hasFill, hasStroke, gs.fillColor, gs.strokeColor, gs.lineWidthPt);
-      } else if (fn === OPS.rectangle && args.length >= 4) {
-        const [rx, ry, rw, rh] = args as number[];
-        const [x1, y1] = applyCtm(ctm, rx, ry);
-        const [x2, y2] = applyCtm(ctm, rx + rw, ry + rh);
-        const minX = Math.min(x1, x2);
-        const maxX = Math.max(x1, x2);
-        const minY = pageHeightPt - Math.max(y1, y2);
-        const maxY = pageHeightPt - Math.min(y1, y2);
-        pendingRects.push({
-          x: minX / PT_PER_INCH,
-          y: minY / PT_PER_INCH,
-          w: (maxX - minX) / PT_PER_INCH,
-          h: (maxY - minY) / PT_PER_INCH,
-        });
-      } else if (fn === OPS.moveTo && args.length >= 2) {
-        const [px, py] = applyCtm(ctm, Number(args[0]), Number(args[1]));
-        curX = px;
-        curY = pageHeightPt - py;
-      } else if (fn === OPS.lineTo && args.length >= 2) {
-        const [px, py] = applyCtm(ctm, Number(args[0]), Number(args[1]));
-        const nextX = px;
-        const nextY = pageHeightPt - py;
-        pendingLines.push({
-          x1: curX / PT_PER_INCH,
-          y1: curY / PT_PER_INCH,
-          x2: nextX / PT_PER_INCH,
-          y2: nextY / PT_PER_INCH,
-        });
-        curX = nextX;
-        curY = nextY;
-      } else if (fn === OPS.constructPath && Array.isArray(args[0]) && Array.isArray(args[1])) {
-        const subOps = args[0] as number[];
-        const coords = args[1] as number[];
-        let ci = 0;
-        for (const sop of subOps) {
-          if (sop === OPS.moveTo) {
-            const [px, py] = applyCtm(ctm, coords[ci], coords[ci + 1]);
-            curX = px;
-            curY = pageHeightPt - py;
-            ci += 2;
-          } else if (sop === OPS.lineTo) {
-            const [px, py] = applyCtm(ctm, coords[ci], coords[ci + 1]);
-            const nextX = px;
-            const nextY = pageHeightPt - py;
-            pendingLines.push({
-              x1: curX / PT_PER_INCH,
-              y1: curY / PT_PER_INCH,
-              x2: nextX / PT_PER_INCH,
-              y2: nextY / PT_PER_INCH,
-            });
-            curX = nextX;
-            curY = nextY;
-            ci += 2;
-          } else if (sop === OPS.curveTo) {
-            ci += 6;
-          } else if (sop === OPS.rectangle) {
-            const [x1, y1] = applyCtm(ctm, coords[ci], coords[ci + 1]);
-            const [x2, y2] = applyCtm(ctm, coords[ci] + coords[ci + 2], coords[ci + 1] + coords[ci + 3]);
-            pendingRects.push({
-              x: Math.min(x1, x2) / PT_PER_INCH,
-              y: (pageHeightPt - Math.max(y1, y2)) / PT_PER_INCH,
-              w: Math.abs(x2 - x1) / PT_PER_INCH,
-              h: Math.abs(y2 - y1) / PT_PER_INCH,
-            });
-            ci += 4;
-          }
-        }
-      } else if (
-        fn === OPS.stroke ||
-        fn === OPS.closeStroke ||
-        fn === OPS.fill ||
-        fn === OPS.eoFill ||
-        fn === OPS.fillStroke ||
-        fn === OPS.eoFillStroke
-      ) {
-        const hasFill =
-          fn === OPS.fill || fn === OPS.eoFill || fn === OPS.fillStroke || fn === OPS.eoFillStroke;
-        const hasStroke =
-          fn === OPS.stroke ||
-          fn === OPS.closeStroke ||
-          fn === OPS.fillStroke ||
-          fn === OPS.eoFillStroke;
-
-        for (const r of pendingRects) {
-          if (r.w > 0.01 || r.h > 0.01) {
-            vectorRects.push({
-              x: Math.max(0, r.x),
-              y: Math.max(0, r.y),
-              width: r.w,
-              height: r.h,
-              strokeColor: hasStroke ? gs.strokeColor : undefined,
-              fillColor: hasFill ? gs.fillColor : undefined,
-              lineWidthPt: gs.lineWidthPt,
-            });
-          }
-        }
-        for (const ln of pendingLines) {
-          const w = Math.abs(ln.x2 - ln.x1);
-          const h = Math.abs(ln.y2 - ln.y1);
-          if (w > 0.05 || h > 0.05) {
-            const lineThicknessIn = Math.max(0.005, gs.lineWidthPt / PT_PER_INCH);
-            vectorRects.push({
-              x: Math.max(0, Math.min(ln.x1, ln.x2)),
-              y: Math.max(0, Math.min(ln.y1, ln.y2)),
-              width: w <= 0.035 ? Math.max(lineThicknessIn, w) : w,
-              height: h <= 0.035 ? Math.max(lineThicknessIn, h) : h,
-              strokeColor: hasStroke ? gs.strokeColor : gs.fillColor,
-              lineWidthPt: gs.lineWidthPt,
-            });
-          }
-        }
-        pendingRects = [];
-        pendingLines = [];
-      } else if (fn === OPS.endPath) {
-        pendingRects = [];
-        pendingLines = [];
-      } else if (fn === OPS.paintImageXObject || fn === OPS.paintInlineImageXObject) {
-        const [x1, y1] = applyCtm(ctm, 0, 0);
-        const [x2, y2] = applyCtm(ctm, 1, 1);
-        const minX = Math.min(x1, x2) / PT_PER_INCH;
-        const maxX = Math.max(x1, x2) / PT_PER_INCH;
-        const minY = (pageHeightPt - Math.max(y1, y2)) / PT_PER_INCH;
-        const maxY = (pageHeightPt - Math.min(y1, y2)) / PT_PER_INCH;
-        if (maxX - minX > 0.1 && maxY - minY > 0.1) {
-          imageBoxes.push({
-            x: Math.max(0, minX),
-            y: Math.max(0, minY),
-            width: maxX - minX,
-            height: maxY - minY,
-          });
-        }
-      }
-    }
-
-    const complexClusterBoxes: Array<{
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      fallbackRect?: RawVectorRect;
-    }> = [];
-    const pad = 0.12;
-    for (const cb of curveBoxes) {
-      const merged = complexClusterBoxes.find(
-        (existing) =>
-          cb.x <= existing.x + existing.width + pad &&
-          cb.x + cb.width >= existing.x - pad &&
-          cb.y <= existing.y + existing.height + pad &&
-          cb.y + cb.height >= existing.y - pad
-      );
-      if (merged) {
-        const x1 = Math.min(merged.x, cb.x);
-        const y1 = Math.min(merged.y, cb.y);
-        const x2 = Math.max(merged.x + merged.width, cb.x + cb.width);
-        const y2 = Math.max(merged.y + merged.height, cb.y + cb.height);
-        merged.x = x1;
-        merged.y = y1;
-        merged.width = x2 - x1;
-        merged.height = y2 - y1;
-        if (!merged.fallbackRect && cb.fallbackRect) merged.fallbackRect = cb.fallbackRect;
-      } else {
-        complexClusterBoxes.push({ ...cb });
-      }
-    }
-
-    return {
-      vectorRects,
-      imageBoxes,
-      complexClusterBoxes: complexClusterBoxes.filter(
-        (b) =>
-          Math.max(b.width, b.height) >= 0.14 &&
-          Math.min(b.width, b.height) >= 0.08 &&
-          b.width <= pageWidthIn + 0.05 &&
-          b.height <= 4.5
-      ),
-      textColorEvents,
-    };
   }
 
   public async rasterizePagesWithGhostscript(pdfBytes: Uint8Array, dpi = 150): Promise<Buffer[]> {

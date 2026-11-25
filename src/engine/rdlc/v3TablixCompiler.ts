@@ -5,6 +5,7 @@ import {
   LayoutSectionSummary,
   RdlcBandContainerSpec,
   RdlcDocumentHierarchy,
+  RdlcSchemaVersion,
   RegionStyle,
   ReportFieldDef,
   StructuredLogger,
@@ -19,6 +20,7 @@ import {
   VisualTextRun,
 } from '../core/types.ts';
 import { ParameterDetectionContext, parameterizeTextRuns } from './parameterDetector.ts';
+import { Rdlc2008LayoutCompiler } from './rdlc2008LayoutCompiler.ts';
 
 const PT_PER_INCH = 72;
 
@@ -156,6 +158,10 @@ export interface V3CompileInput {
   pages: LayoutPage[];
   pageWidthIn: number;
   pageHeightIn: number;
+  fullPageWidthIn?: number;
+  fullPageHeightIn?: number;
+  marginsIn?: { top: number; right: number; bottom: number; left: number };
+  schemaVersion?: RdlcSchemaVersion;
   dataSetName: string;
   pageTablixesByPage: Map<number, TablixRegion[]>;
   coveredByTablixFn: (pageNumber: number, x: number, y: number, w: number, h: number) => boolean;
@@ -219,6 +225,21 @@ export class V3TablixCompiler {
   }
 
   public compile(input: V3CompileInput): V3CompileOutput {
+    if ((input.schemaVersion ?? '2008') === '2008') {
+      const compiler2008 = new Rdlc2008LayoutCompiler(this.logger);
+      return compiler2008.compile({
+        pages: input.pages,
+        printableWidthIn: input.pageWidthIn,
+        printableHeightIn: input.pageHeightIn,
+        fullPageWidthIn: input.fullPageWidthIn ?? input.pageWidthIn,
+        fullPageHeightIn: input.fullPageHeightIn ?? input.pageHeightIn,
+        marginsIn: input.marginsIn ?? { top: 0, right: 0, bottom: 0, left: 0 },
+        dataSetName: input.dataSetName,
+        registerEmbeddedImage: input.registerEmbeddedImage,
+        nextUniqueName: input.nextUniqueName,
+      });
+    }
+
     const {
       pages,
       pageWidthIn,
